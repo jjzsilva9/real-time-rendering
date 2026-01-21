@@ -1,0 +1,64 @@
+#version 330
+
+in vec2 TexCoord;
+in mat4 view_matrix;
+in vec3 TangentLightPos;
+in vec3 TangentViewPos;
+in vec3 TangentFragPos;
+in vec3 ViewFragPos;
+
+// Directional Light Source Properties
+uniform vec3 Ld; // Diffuse
+uniform vec3 Ls; // Specular
+uniform vec3 La; // Ambient
+
+// Surface Properties
+uniform vec3 Kd; // Diffuse
+uniform vec3 Ks; // Specular
+uniform vec3 Ka; // Ambient
+uniform float Ns; // Specular Exponent
+uniform float normalMapIntensity;
+
+// Texture and Normal Map Properties
+// uniform sampler2D ourTexture;
+// uniform sampler2D normalMap;
+
+void main(){
+	
+	/*vec3 flatNormal = vec3(0.0, 0.0, 1.0);
+	vec3 normal = texture(normalMap, TexCoord).rgb;
+	normal = normalize(normal * 2.0 - 1.0);
+	normal = normalize(mix(flatNormal, normal, normalMapIntensity));
+	
+	// Ambient Term
+	vec3 Ia = La * Ka;
+
+	// Difffuse Term
+	vec3 L = normalize(TangentLightPos - TangentFragPos);
+	vec3 Id = Ld * Kd * max(dot(L, normal), 0.0);
+
+	// Specular Intensity
+	vec3 V = normalize(TangentViewPos - TangentFragPos);
+	vec3 H = normalize(L + V);
+	vec3 Is = Ls * Ks * pow(max(dot(normal, H), 0.0), Ns);
+
+	if (fog_enabled) {
+		float dist = length(ViewFragPos);
+		float factor;
+		if (fog_factor == 0) {
+			factor = (fog_maxdist - dist) / (fog_maxdist - fog_mindist);
+		} else if (fog_factor == 1) {
+			factor = exp(-1.0/fog_maxdist * dist);
+		} else if (fog_factor == 2) {
+			factor = pow(exp(-1.0/fog_maxdist * dist), 2);
+		}
+		factor = clamp(factor, 0.3, 1.0);
+		// Combine terms and multiply by the texture
+		gl_FragColor = mix(fog_color, vec4((Ia + Id + Is) * texture(ourTexture, TexCoord).rgb, 1.0), factor);
+	} else {
+		gl_FragColor = vec4((Ia + Id + Is) * texture(ourTexture, TexCoord).rgb, 1.0);
+	}*/
+
+	gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+	
+}
