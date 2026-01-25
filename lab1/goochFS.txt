@@ -1,0 +1,26 @@
+#version 330
+
+in vec3 eyeCoords, tnorm;
+in mat4 view_matrix;
+
+// Directional Light Source Properties
+uniform vec4 LightPosition = vec4(10.0, 10.0, 4.0, 1.0); // Light position in world coords.
+
+// Gooch Properties
+vec3 cool = vec3(0, 0, 0.6);
+vec3 warm = vec3(0.6, 0, 0);
+float Ns = 10; // Specular Exponent
+
+void main(){
+	vec3 light_eye = vec3(view_matrix * LightPosition);
+	vec3 L = normalize(light_eye - eyeCoords);
+
+	// Specular Intensity
+	vec3 R = reflect(-L, tnorm);
+	vec3 V = normalize(eyeCoords);
+	float Is = pow(max(dot(R, V), 0.0), Ns);
+
+	vec3 final = mix(cool, warm, (dot(L, tnorm) + 1.0) * 0.5);
+
+	gl_FragColor = vec4(min(final + Is, 1.0), 1.0);
+}

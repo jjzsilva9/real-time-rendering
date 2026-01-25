@@ -131,6 +131,7 @@
   </ItemGroup>
   <ItemGroup>
     <Text Include="fragmentShader.txt" />
+    <Text Include="goochFS.txt" />
     <Text Include="vertexShader.txt" />
   </ItemGroup>
   <ItemGroup>

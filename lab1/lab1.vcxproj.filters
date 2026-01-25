@@ -38,6 +38,7 @@
     <Text Include="vertexShader.txt">
       <Filter>Source Files</Filter>
     </Text>
+    <Text Include="goochFS.txt" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="directionallight.h">
