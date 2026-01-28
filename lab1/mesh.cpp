@@ -50,15 +50,6 @@ void Mesh::Draw(mat4 model) {
 		}
 	}
 
-	int diffuse_location = glGetUniformLocation(shaderProgramID, "Kd");
-	int specular_location = glGetUniformLocation(shaderProgramID, "Ks");
-	int ambient_location = glGetUniformLocation(shaderProgramID, "Ka");
-	int exponent_location = glGetUniformLocation(shaderProgramID, "Ns");
-	glUniform3fv(diffuse_location, 1, material.Kd.v);
-	glUniform3fv(specular_location, 1, material.Ks.v);
-	glUniform3fv(ambient_location, 1, material.Ka.v);
-	glUniform1fv(exponent_location, 1, &material.Ns);
-
 	int matrix_location = glGetUniformLocation(shaderProgramID, "model");
 	glUniformMatrix4fv(matrix_location, 1, GL_FALSE, model.m);
 	glBindVertexArray(VAO);

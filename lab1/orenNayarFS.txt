@@ -1,0 +1,41 @@
+#version 330
+
+in vec3 eyeCoords, tnorm;
+in mat4 view_matrix;
+
+// Directional Light Source Properties
+uniform vec4 LightPosition = vec4(10.0, 10.0, 4.0, 1.0); // Light position in world coords.
+uniform vec3 Ld = vec3(0.7, 0.7, 0.7); // Diffuse
+uniform float roughness = 0.5;
+
+// Surface Properties
+uniform vec3 Kd = vec3(1.0, 1.0, 1.0); // Diffuse reflectance
+
+out vec4 fragColor;
+
+void main(){
+	vec3 light_eye = vec3(view_matrix * LightPosition);
+	vec3 L = normalize(light_eye - eyeCoords);
+	vec3 V = normalize(-eyeCoords);
+	
+	float NdotL = dot(tnorm, L);
+	float NdotV = dot(tnorm, V);
+
+	float angleL = acos(NdotL);
+	float angleV = acos(NdotV);
+
+	float alpha = max(angleL, angleV);
+	float beta = min(angleL, angleV);
+	float gamma = cos(angleV - angleL);
+
+	float roughnessSquared = roughness * roughness;
+	float A = 1.0 - 0.5 * (roughnessSquared / (roughnessSquared + 0.57));
+	float B = 0.45 * (roughnessSquared / (roughnessSquared + 0.09));
+	float C = sin(alpha) * tan(beta);
+
+	float orenNayar = clamp(NdotL, 0.0, 1.0) * (A + (B * max(0.0, gamma) * C));
+
+	vec3 diffuse = Ld * Kd * orenNayar;
+
+	fragColor = vec4(diffuse, 1.0);
+}

@@ -39,6 +39,7 @@
       <Filter>Source Files</Filter>
     </Text>
     <Text Include="goochFS.txt" />
+    <Text Include="orenNayarFS.txt" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="directionallight.h">

@@ -7,9 +7,9 @@ in mat4 view_matrix;
 uniform vec4 LightPosition = vec4(10.0, 10.0, 4.0, 1.0); // Light position in world coords.
 
 // Gooch Properties
-vec3 cool = vec3(0, 0, 0.6);
-vec3 warm = vec3(0.6, 0, 0);
-float Ns = 10; // Specular Exponent
+uniform vec3 cool = vec3(0, 0, 0.6);
+uniform vec3 warm = vec3(0.6, 0, 0);
+uniform float Ns = 10.0; // Specular Exponent
 
 void main(){
 	vec3 light_eye = vec3(view_matrix * LightPosition);
