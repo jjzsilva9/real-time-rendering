@@ -77,6 +77,7 @@ Skybox* skybox = nullptr;
 bool showGUI = false;
 
 float eta = 0.5;
+float chromatic = 0.0;
 
 #pragma region INPUT_FUNCTIONS
 
@@ -178,8 +179,9 @@ void renderGUI() {
 		ImGui::Begin("Shader Controls", &showGUI, ImGuiWindowFlags_AlwaysAutoResize);
 		
 		// Shared Light Position
-		if (ImGui::CollapsingHeader("Relative index of Refraction", ImGuiTreeNodeFlags_DefaultOpen)) {
-			ImGui::SliderFloat("Value", &eta, 0, 1);
+		if (ImGui::CollapsingHeader("Refraction settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::SliderFloat("Index of refraction", &eta, 0, 1);
+			ImGui::SliderFloat("Chromatic Dispersion", &chromatic, 0, 1);
 		}
 
 		ImGui::End();
@@ -240,9 +242,11 @@ void display() {
 		glUniformMatrix4fv(proj_mat_location, 1, GL_FALSE, glm::value_ptr(persp_proj));
 		glUniformMatrix4fv(view_mat_location, 1, GL_FALSE, glm::value_ptr(view));
 
-		// Set shared light position for all shaders
 		int eta_location = glGetUniformLocation(shader->ID, "eta");
 		glUniform1f(eta_location, eta);
+
+		int chrom_location = glGetUniformLocation(shader->ID, "chromatic");
+		glUniform1f(chrom_location, chromatic);
 
 		int skybox_location = glGetUniformLocation(skyboxShader->ID, "skybox");
 		glUniform1i(skybox_location, 0);

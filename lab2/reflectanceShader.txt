@@ -2,7 +2,7 @@
 
 uniform samplerCube skybox;
 uniform float eta = 0.8;
-in vec3 Ra, Re;
+in vec3 RaR, RaG, RaB, Re;
 in vec3 tnorm;
 in vec3 I;
 
@@ -13,7 +13,10 @@ void main(){
 	float fresnel = F_0 + (1.0 - F_0) * pow(1.0 - cosTheta, 5.0);
 
 	vec3 reflection = texture(skybox, Re).rgb;
-	vec3 refraction = texture(skybox, Ra).rgb;
+	float refractionR = texture(skybox, RaR).r;
+	float refractionG = texture(skybox, RaG).g;
+	float refractionB = texture(skybox, RaB).b;
+	vec3 refraction = vec3(refractionR, refractionG, refractionB);
 
 	vec3 final = mix(refraction, reflection, fresnel);
 	gl_FragColor = vec4(final, 1.0);

@@ -5,13 +5,14 @@ in vec3 vertex_normal;
 
 out vec3 eyeCoords, tnorm;
 out mat4 view_matrix;
-out vec3 Ra, Re;
+out vec3 RaR, RaG, RaB, Re;
 out vec3 I;
 
 uniform mat4 view;
 uniform mat4 proj;
 uniform mat4 model;
 uniform float eta = 0.8;
+uniform float chromatic = 0.0;
 
 void main(){
 
@@ -28,9 +29,13 @@ void main(){
   tnorm = worldNormal;
   
   view_matrix = view;
+
+  float scaledChromatic = (1.0 - eta) * chromatic;
   
-  Ra = refract(I, worldNormal, eta);
   Re = reflect(I, worldNormal);
+  RaR = refract(I, worldNormal, eta - 0.1 * scaledChromatic);
+  RaG = refract(I, worldNormal, eta);
+  RaB = refract(I, worldNormal, eta + 0.1 * scaledChromatic);
   
   gl_Position = proj * vec4(eyeCoords, 1.0);
 }
