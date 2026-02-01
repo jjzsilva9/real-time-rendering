@@ -15,37 +15,38 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="directionallight.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="mesh.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="model.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="maths_funcs.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="directionallight.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="skybox.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <Text Include="fragmentShader.txt">
-      <Filter>Source Files</Filter>
-    </Text>
     <Text Include="vertexShader.txt">
       <Filter>Source Files</Filter>
     </Text>
-    <Text Include="goochFS.txt" />
-    <Text Include="orenNayarFS.txt" />
+    <Text Include="reflectanceShader.txt">
+      <Filter>Source Files</Filter>
+    </Text>
+    <Text Include="skyboxFragmentShader.txt">
+      <Filter>Source Files</Filter>
+    </Text>
+    <Text Include="skyboxVertexShader.txt">
+      <Filter>Source Files</Filter>
+    </Text>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="directionallight.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="maths_funcs.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="mesh.h">
@@ -55,6 +56,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="skybox.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
