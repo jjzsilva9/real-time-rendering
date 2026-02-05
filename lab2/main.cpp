@@ -47,8 +47,8 @@ namespace std {
 
 typedef struct
 {
-	glm::vec3 position = glm::vec3(0.0f, 0.0f, -40.0f);
-	glm::vec3 direction = glm::vec3(0.0f, 0.0f, 1.0f);
+	glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f);
+	glm::vec3 direction = glm::vec3(0.0f, 0.0f, -1.0f);
 	glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
 } Camera;
 Camera camera;
@@ -72,12 +72,17 @@ Shader* shader = nullptr;
 Shader* skyboxShader = nullptr;
 DirectionalLight* lightSource = nullptr;
 std::vector<Model*> teapots;
+std::vector<Model*> toruses;
+std::vector<Model*> cubes;
+std::vector<std::vector<Model*>> models;
 Skybox* skybox = nullptr;
 
 bool showGUI = false;
 
 float eta = 0.5;
 float chromatic = 0.0;
+bool rotating = false;
+static int shape = 0;
 
 #pragma region INPUT_FUNCTIONS
 
@@ -184,6 +189,12 @@ void renderGUI() {
 			ImGui::SliderFloat("Chromatic Dispersion", &chromatic, 0, 1);
 		}
 
+		if (ImGui::CollapsingHeader("Object Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::Checkbox("Rotate", &rotating);
+
+			const char* items[] = { "Teapot", "Cube", "Torus" };
+			ImGui::Combo("Shape", &shape, items, IM_ARRAYSIZE(items));
+		}
 		ImGui::End();
 	}
 
@@ -232,7 +243,16 @@ void display() {
 	
 	glm::vec3 rotation = glm::vec3(0.0, 50.0, 50.0);
 	glm::vec3 position;
-	Model* teapot;
+	
+	// Select the current model list based on shape selection
+	std::vector<Model*>* currentModels = nullptr;
+	switch (shape) {
+		case 0: currentModels = &teapots; break;
+		case 1: currentModels = &cubes; break;
+		case 2: currentModels = &toruses; break;
+		default: currentModels = &teapots; break;
+	}
+	
 	for (int i = 0; i < 3; i++) {
 		shader->use();
 
@@ -251,12 +271,14 @@ void display() {
 		int skybox_location = glGetUniformLocation(skyboxShader->ID, "skybox");
 		glUniform1i(skybox_location, 0);
 
-		teapot = teapots[i];
-		position = glm::vec3(teapot->model[3][0], teapot->model[3][1], teapot->model[3][2]);
-		teapot->translate(-position);
-		teapot->rotate(rotation * delta);
-		teapot->translate(position);
-		teapot->Draw();
+		Model* currentModel = (*currentModels)[i];
+		if (rotating) {
+			position = glm::vec3(currentModel->model[3][0], currentModel->model[3][1], currentModel->model[3][2]);
+			currentModel->translate(-position);
+			currentModel->rotate(rotation * delta);
+			currentModel->translate(position);
+		}
+		currentModel->Draw();
 	}
 	renderGUI();
 	glutSwapBuffers();
@@ -287,10 +309,25 @@ void init()
 {
 	shader = new Shader("vertexShader.txt", "reflectanceShader.txt");
 	skyboxShader = new Shader("skyboxVertexShader.txt", "skyboxFragmentShader.txt");
-	Model* teapot;
+	
+	// Load teapots
 	for (int i = 0; i < 3; i++) {
-		teapot = new Model("utah_teapot.obj", glm::vec3((7.5f * i) - 7.5f, 0.0, -20.0), shader);
+		Model* teapot = new Model("utah_teapot.obj", glm::vec3((7.5f * i) - 7.5f, 0.0, -20.0), shader);
 		teapots.push_back(teapot);
+	}
+
+	// Load cubes
+	for (int i = 0; i < 3; i++) {
+		Model* cube = new Model("cube.obj", glm::vec3((7.5f * i) - 7.5f, 0.0, -20.0), shader);
+		cube->model = glm::scale(cube->model, glm::vec3(2.0f, 2.0f, 2.0f));
+		cubes.push_back(cube);
+	}
+	
+	// Load toruses
+	for (int i = 0; i < 3; i++) {
+		Model* torus = new Model("torus.obj", glm::vec3((7.5f * i) - 7.5f, 0.0, -20.0), shader);
+		torus->model = glm::scale(torus->model, glm::vec3(3.0f, 3.0f, 3.0f));
+		toruses.push_back(torus);
 	}
 
 	std::vector<std::string> faces = {
