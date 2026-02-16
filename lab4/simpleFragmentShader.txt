@@ -1,0 +1,14 @@
+#version 330
+
+in vec2 TexCoord;
+
+uniform float textureScale;
+uniform sampler2D ourTexture;
+
+out vec4 FragColor;
+
+void main()
+{
+ vec3 albedo = texture(ourTexture, TexCoord * textureScale).rgb;
+ FragColor = vec4(albedo,1.0);
+}
