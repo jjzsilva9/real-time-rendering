@@ -44,9 +44,9 @@ Model::Model(const char* path, glm::vec3 position, Shader* shader) {
 	loadModel(path);
 }
 
-void Model::Draw() {
+void Model::Draw(Shader* shaderOverride) {
 	for (int i = 0; i < meshes.size(); i++) {
-		meshes[i].Draw(model);
+		meshes[i].Draw(model, shaderOverride);
 	}
 }
 

@@ -38,21 +38,24 @@ Mesh::Mesh(std::vector<Vertex> vertices, std::vector<unsigned int> indices, std:
     setupMesh();
 }
 
-void Mesh::Draw(glm::mat4 model) {
+void Mesh::Draw(glm::mat4 model, Shader* shaderOverride) {
+	Shader* currentShader = shaderOverride ? shaderOverride : shader;
+	GLuint currentProgramID = currentShader->ID;
+
 	for (unsigned int i = 0; i < textures.size(); i++) {
 		glActiveTexture(GL_TEXTURE0 + i);
 		string name = textures[i].type;
 		if (name == "texture_diffuse") {
 			glBindTexture(GL_TEXTURE_2D, textures[i].id);
-			shader->setInt("ourTexture", 0);
+			currentShader->setInt("ourTexture", 0);
 		}
 		else if (name == "texture_normal") {
 			glBindTexture(GL_TEXTURE_2D, textures[i].id);
-			shader->setInt("normalMap", 1);
+			currentShader->setInt("normalMap", 1);
 		}
 	}
 
-	int matrix_location = glGetUniformLocation(shaderProgramID, "model");
+	int matrix_location = glGetUniformLocation(currentProgramID, "model");
 	glUniformMatrix4fv(matrix_location, 1, GL_FALSE, glm::value_ptr(model));
 	glBindVertexArray(VAO);
 	glDrawElements(GL_TRIANGLES, (GLsizei)indices.size(), GL_UNSIGNED_INT, 0);
@@ -75,26 +78,21 @@ void Mesh::setupMesh() {
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
 
-	GLuint loc1 = glGetAttribLocation(shaderProgramID, "vertex_position");
-	GLuint loc2 = glGetAttribLocation(shaderProgramID, "vertex_normal");
-	GLuint loc3 = glGetAttribLocation(shaderProgramID, "vertex_texture");
-	GLuint loc4 = glGetAttribLocation(shaderProgramID, "vertex_tangent");
-	GLuint loc5 = glGetAttribLocation(shaderProgramID, "vertex_bitangent");
-	
-	glEnableVertexAttribArray(loc1);
-	glVertexAttribPointer(loc1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), NULL);
+	// Locations 0-4 are now standardized across all shaders
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
 
-	glEnableVertexAttribArray(loc2);
-	glVertexAttribPointer(loc2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Normal));
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Normal));
 
-	glEnableVertexAttribArray(loc3);
-	glVertexAttribPointer(loc3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, TextureCoords));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, TextureCoords));
 
-	glEnableVertexAttribArray(loc4);
-	glVertexAttribPointer(loc4, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Tangent));
+	glEnableVertexAttribArray(3);
+	glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Tangent));
 
-	glEnableVertexAttribArray(loc5);
-	glVertexAttribPointer(loc5, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Bitangent));
+	glEnableVertexAttribArray(4);
+	glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Bitangent));
 
 	glBindVertexArray(0);
 }

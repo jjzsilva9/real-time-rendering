@@ -36,6 +36,7 @@ namespace std {
 #include "shader.h"
 #include "model.h"
 #include "directionallight.h"
+#include "gbuffer.h"
 
 #include "imgui.h"
 #include "imgui_impl_glut.h"
@@ -68,8 +69,14 @@ int lastY = height / 2;
 bool firstMouse = true;
 
 Shader* shader = nullptr;
+Shader* gShader = nullptr;
+Shader* rectShader = nullptr;
+GBuffer* gBuffer = nullptr;
 DirectionalLight* lightSource = nullptr;
 Model* sponza = nullptr;
+
+GLuint quadVAO = 0, quadVBO;
+int displayMode = 0; // 0: Combined, 1: Pos, 2: Norm, 3: Albedo
 
 bool showGUI = false;
 
@@ -185,6 +192,11 @@ void reshape(int x, int y) {
 	glViewport(0, 0, x, y);
 	persp_proj = glm::perspective(glm::radians(45.0f), (float)width / (float)height, 0.1f, 1000.0f);
 
+	if (gBuffer) {
+		delete gBuffer;
+		gBuffer = new GBuffer(width, height);
+	}
+
 	ImGui_ImplGLUT_ReshapeFunc(x, y);
 }
 
@@ -204,8 +216,15 @@ void renderGUI() {
 
 		ImGui::Text("Camera: (%.1f, %.1f, %.1f)", camera.position.x, camera.position.y, camera.position.z);
 		ImGui::Separator();
+		ImGui::Combo("Display Mode", &displayMode, "Final\0Position\0Normal\0Albedo\0\0");
 		ImGui::DragFloat("Normal Map", &normal, 0.1f, 0.0f, 10.0f);
 		ImGui::DragFloat3("Light Position", lightPos, 0.1f);
+		if (sponza) {
+			static float s = 0.05f;
+			if (ImGui::DragFloat("Sponza Scale", &s, 0.001f, 0.001f, 1.0f)) {
+				sponza->model = glm::scale(glm::mat4(1.0f), glm::vec3(s));
+			}
+		}
 
 		ImGui::End();
 	}
@@ -214,30 +233,84 @@ void renderGUI() {
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
-// Custom function to print glm::mat4
-void printMatrix(const glm::mat4& matrix, const std::string& name) {
-	std::cout << name << ":\n";
-	for (int i = 0; i < 4; ++i) {
-		for (int j = 0; j < 4; ++j) {
-			std::cout << matrix[i][j] << " ";
-		}
-		std::cout << "\n";
+void renderQuad() {
+	if (quadVAO == 0) {
+		float quadVertices[] = {
+			// positions        // texture Coords
+			-1.0f,  1.0f, 0.0f, 0.0f, 1.0f,
+			-1.0f, -1.0f, 0.0f, 0.0f, 0.0f,
+			 1.0f,  1.0f, 0.0f, 1.0f, 1.0f,
+			 1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
+		};
+		glGenVertexArrays(1, &quadVAO);
+		glGenBuffers(1, &quadVBO);
+		glBindVertexArray(quadVAO);
+		glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+		glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), &quadVertices, GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
 	}
+	glBindVertexArray(quadVAO);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glBindVertexArray(0);
 }
 
 void display() {
-	glEnable(GL_DEPTH_TEST);
-	glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	if (displayMode == 0) {
+		// --- FINAL MODE: Normal Forward Rendering ---
+		glEnable(GL_DEPTH_TEST);
+		glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-	// --- Scene pass ---
-	shader->use();
-	glUniformMatrix4fv(glGetUniformLocation(shader->ID, "proj"),  1, GL_FALSE, glm::value_ptr(persp_proj));
-	glUniformMatrix4fv(glGetUniformLocation(shader->ID, "view"),  1, GL_FALSE, glm::value_ptr(view));
-	glUniform1f(glGetUniformLocation(shader->ID, "normalMapIntensity"), normal);
-	glUniform4f(glGetUniformLocation(shader->ID, "LightPosition"), lightPos[0], lightPos[1], lightPos[2], 1.0f);
+		shader->use();
+		shader->setMat4("proj",  persp_proj);
+		shader->setMat4("view",  view);
+		shader->setMat4("model", sponza->model); // Explicitly set model matrix
+		shader->setFloat("normalMapIntensity", normal);
+		// shader expects vec4 for LightPosition
+		glUniform4f(glGetUniformLocation(shader->ID, "LightPosition"), lightPos[0], lightPos[1], lightPos[2], 1.0f);
 
-	if (sponza) sponza->Draw();
+		if (sponza) sponza->Draw();
+	} else {
+		// --- G-BUFFER MODES ---
+
+		// 1. Geometry Pass: render scene into G-Buffer
+		glBindFramebuffer(GL_FRAMEBUFFER, gBuffer->fbo);
+		glViewport(0, 0, width, height);
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glEnable(GL_DEPTH_TEST);
+		glDisable(GL_BLEND); // Disable blending for G-Buffer
+
+		gShader->use();
+		gShader->setMat4("proj", persp_proj);
+		gShader->setMat4("view", view);
+		gShader->setFloat("normalMapIntensity", normal);
+		
+		if (sponza) sponza->Draw(gShader); // Correctly pass gShader
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+		// 2. Lighting/Display Pass: render quad with G-Buffer textures
+		glViewport(0, 0, width, height);
+		glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glDisable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND); // Re-enable for HUD
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		
+		rectShader->use();
+		rectShader->setInt("screenTexture", 0);
+		glActiveTexture(GL_TEXTURE0);
+
+		if (displayMode == 1) glBindTexture(GL_TEXTURE_2D, gBuffer->gPosition);
+		if (displayMode == 2) glBindTexture(GL_TEXTURE_2D, gBuffer->gNormal);
+		if (displayMode == 3) glBindTexture(GL_TEXTURE_2D, gBuffer->gAlbedoSpec);
+		
+		renderQuad();
+		glEnable(GL_DEPTH_TEST);
+	}
 
 	renderGUI();
 	glutSwapBuffers();
@@ -267,6 +340,9 @@ void updateScene() {
 void init()
 {
 	shader = new Shader("simpleVertexShader.txt", "simpleFragmentShader.txt");
+	gShader = new Shader("gbuffer_vs.glsl", "gbuffer_fs.glsl");
+	rectShader = new Shader("rect_vs.glsl", "rect_fs.glsl");
+	gBuffer = new GBuffer(width, height);
 
 	// Camera start position — inside the Sponza atrium
 	camera.position  = glm::vec3(0.0f, 2.0f, 0.0f);
@@ -275,6 +351,7 @@ void init()
 	// Sponza
 	std::cout << "Loading Sponza..." << std::endl;
 	sponza = new Model("sponza/Sponza.gltf", glm::vec3(0.0f, 0.0f, 0.0f), shader);
+	sponza->model = glm::scale(glm::mat4(1.0f), glm::vec3(0.05f));
 	std::cout << "Sponza meshes: " << sponza->meshes.size() << std::endl;
 	for (size_t i = 0; i < sponza->meshes.size(); i++)
 		std::cout << "  Mesh " << i << " textures: " << sponza->meshes[i].textures.size() << std::endl;
@@ -285,6 +362,9 @@ void cleanup() {
 	ImGui_ImplGLUT_Shutdown();
 	ImGui::DestroyContext();
 	delete shader;
+	delete gShader;
+	delete rectShader;
+	delete gBuffer;
 	delete sponza;
 }
 

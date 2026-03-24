@@ -44,7 +44,7 @@ public:
 	
 	Mesh(std::vector<Vertex> vertices, std::vector<unsigned int> indices, std::vector<Texture> textures, Shader* shader);
 
-	void Draw(glm::mat4 model);
+	void Draw(glm::mat4 model, Shader* shaderOverride = nullptr);
 private:
 	unsigned int VAO, VBO, EBO;
 	GLuint shaderProgramID;

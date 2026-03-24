@@ -32,7 +32,7 @@ public:
 	std::vector<Mesh> meshes;
 
 	Model(const char* path, glm::vec3 position, Shader* shader);
-	void Draw();
+	void Draw(Shader* shaderOverride = nullptr);
 	void translate(glm::vec3 offset);
 	void rotate(glm::vec3 offset);
 	void changeMeshMaterials();
