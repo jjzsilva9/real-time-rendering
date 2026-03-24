@@ -27,45 +27,39 @@ public:
 	GLuint ID;
 	
 	Shader(const char* vertexPath, const char* fragmentPath) {
-		//Start the process of setting up our shaders by creating a program ID
-	//Note: we will link all the shaders together into this ID
 		ID = glCreateProgram();
 		if (ID == 0) {
 			std::cerr << "Error creating shader program..." << std::endl;
-			std::cerr << "Press enter/return to exit..." << std::endl;
-			std::cin.get();
 			exit(1);
 		}
 
-		// Create two shader objects, one for the vertex, and one for the fragment shader
 		AddShader(ID, vertexPath, GL_VERTEX_SHADER);
 		AddShader(ID, fragmentPath, GL_FRAGMENT_SHADER);
+		linkProgram();
+	}
 
-		GLint Success = 0;
-		GLchar ErrorLog[1024] = { '\0' };
-		// After compiling all shader objects and attaching them to the program, we can finally link it
-		glLinkProgram(ID);
-		// check for program related errors using glGetProgramiv
-		glGetProgramiv(ID, GL_LINK_STATUS, &Success);
-		if (Success == 0) {
-			glGetProgramInfoLog(ID, sizeof(ErrorLog), NULL, ErrorLog);
-			std::cerr << "Error linking shader program: " << ErrorLog << std::endl;
-			std::cerr << "Press enter/return to exit..." << std::endl;
-			std::cin.get();
+	Shader(const char* vertexPath, const char* geometryPath, const char* fragmentPath) {
+		ID = glCreateProgram();
+		if (ID == 0) {
+			std::cerr << "Error creating shader program..." << std::endl;
 			exit(1);
 		}
 
-		// program has been successfully linked but needs to be validated to check whether the program can execute given the current pipeline state
-		glValidateProgram(ID);
-		// check for program related errors using glGetProgramiv
-		glGetProgramiv(ID, GL_VALIDATE_STATUS, &Success);
-		if (!Success) {
-			glGetProgramInfoLog(ID, sizeof(ErrorLog), NULL, ErrorLog);
-			std::cerr << "Invalid shader program: " << ErrorLog << std::endl;
-			std::cerr << "Press enter/return to exit..." << std::endl;
-			std::cin.get();
+		AddShader(ID, vertexPath, GL_VERTEX_SHADER);
+		AddShader(ID, geometryPath, GL_GEOMETRY_SHADER);
+		AddShader(ID, fragmentPath, GL_FRAGMENT_SHADER);
+		linkProgram();
+	}
+
+	Shader(const char* computePath) {
+		ID = glCreateProgram();
+		if (ID == 0) {
+			std::cerr << "Error creating shader program..." << std::endl;
 			exit(1);
 		}
+
+		AddShader(ID, computePath, GL_COMPUTE_SHADER);
+		linkProgram();
 	}
 
 	void use() {
@@ -90,6 +84,44 @@ public:
 
 	void setMat4(const std::string& name, const glm::mat4& value) const {
 		glUniformMatrix4fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, glm::value_ptr(value));
+	}
+
+	void bindSSBO(GLuint buffer, GLuint bindingPoint) const {
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bindingPoint, buffer);
+	}
+
+	void bindAtomicCounter(GLuint buffer, GLuint bindingPoint) const {
+		glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, bindingPoint, buffer);
+	}
+
+	void dispatch(GLuint groupsX, GLuint groupsY, GLuint groupsZ) const {
+		glDispatchCompute(groupsX, groupsY, groupsZ);
+	}
+
+	void waitMemory(GLbitfield barriers) const {
+		glMemoryBarrier(barriers);
+	}
+
+private:
+	void linkProgram() {
+		GLint Success = 0;
+		GLchar ErrorLog[1024] = { '\0' };
+
+		glLinkProgram(ID);
+		glGetProgramiv(ID, GL_LINK_STATUS, &Success);
+		if (Success == 0) {
+			glGetProgramInfoLog(ID, sizeof(ErrorLog), NULL, ErrorLog);
+			std::cerr << "Error linking shader program: " << ErrorLog << std::endl;
+			exit(1);
+		}
+
+		glValidateProgram(ID);
+		glGetProgramiv(ID, GL_VALIDATE_STATUS, &Success);
+		if (!Success) {
+			glGetProgramInfoLog(ID, sizeof(ErrorLog), NULL, ErrorLog);
+			std::cerr << "Invalid shader program: " << ErrorLog << std::endl;
+			exit(1);
+		}
 	}
 
 private:
