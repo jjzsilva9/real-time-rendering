@@ -187,7 +187,10 @@ Mesh Model::processMesh(aiMesh* mesh, const aiScene* scene) {
 		else {
 			textureMaterial.Ns = 40.0f;
 		}
-		std::vector<Texture> diffuseMaps = loadMaterialTextures(material, aiTextureType_DIFFUSE, "texture_diffuse");
+		// GLTF uses BASE_COLOR; OBJ uses DIFFUSE — try both
+		std::vector<Texture> diffuseMaps = loadMaterialTextures(material, aiTextureType_BASE_COLOR, "texture_diffuse");
+		if (diffuseMaps.empty())
+			diffuseMaps = loadMaterialTextures(material, aiTextureType_DIFFUSE, "texture_diffuse");
 		for (Texture& a : diffuseMaps) {
 			a.material = textureMaterial;
 		}
@@ -244,6 +247,11 @@ std::vector<Texture> Model::loadMaterialTextures(aiMaterial* mat, aiTextureType 
 
 unsigned int TextureFromFile(const char* path, const string& directory, bool gamma) {
 	string filename = string(path);
+
+	// Prepend directory for relative paths (GLTF stores paths like ./textures/foo.png)
+	if (!directory.empty() && filename[0] != '/' && !(filename.size() > 1 && filename[1] == ':')) {
+		filename = directory + "/" + filename;
+	}
 
 	// Remove normal intensity from file path
 	size_t bmPos = filename.find("-bm ");
