@@ -37,6 +37,8 @@ namespace std {
 #include "model.h"
 #include "directionallight.h"
 #include "gbuffer.h"
+#include "svo_builder.h"
+#include "svo.h"
 
 #include "imgui.h"
 #include "imgui_impl_glut.h"
@@ -71,12 +73,14 @@ bool firstMouse = true;
 Shader* shader = nullptr;
 Shader* gShader = nullptr;
 Shader* rectShader = nullptr;
+Shader* svoShader = nullptr;
 GBuffer* gBuffer = nullptr;
 DirectionalLight* lightSource = nullptr;
 Model* sponza = nullptr;
+SVO* svo = nullptr;
 
 GLuint quadVAO = 0, quadVBO;
-int displayMode = 0; // 0: Combined, 1: Pos, 2: Norm, 3: Albedo
+int displayMode = 0; // 0: Combined, 1: Pos, 2: Norm, 3: Albedo, 4: SVO Raycast
 
 bool showGUI = false;
 
@@ -216,7 +220,11 @@ void renderGUI() {
 
 		ImGui::Text("Camera: (%.1f, %.1f, %.1f)", camera.position.x, camera.position.y, camera.position.z);
 		ImGui::Separator();
-		ImGui::Combo("Display Mode", &displayMode, "Final\0Position\0Normal\0Albedo\0\0");
+		ImGui::Combo("Display Mode", &displayMode, "Final\0Position\0Normal\0Albedo\0SVO Raycast\0\0");
+		if (ImGui::Button("Rebuild SVO")) {
+			if (sponza && svo) SVOBuilder::build(sponza, 256, *svo);
+			if (svo) svo->initGPU();
+		}
 		ImGui::DragFloat("Normal Map", &normal, 0.1f, 0.0f, 10.0f);
 		ImGui::DragFloat3("Light Position", lightPos, 0.1f);
 		if (sponza) {
@@ -273,8 +281,8 @@ void display() {
 		glUniform4f(glGetUniformLocation(shader->ID, "LightPosition"), lightPos[0], lightPos[1], lightPos[2], 1.0f);
 
 		if (sponza) sponza->Draw();
-	} else {
-		// --- G-BUFFER MODES ---
+	} else if (displayMode >= 1 && displayMode <= 4) {
+		// --- G-BUFFER & SVO MODES (Require Geometry Pass) ---
 
 		// 1. Geometry Pass: render scene into G-Buffer
 		glBindFramebuffer(GL_FRAMEBUFFER, gBuffer->fbo);
@@ -312,6 +320,29 @@ void display() {
 		glEnable(GL_DEPTH_TEST);
 	}
 
+	if (displayMode == 4) {
+		// --- SVO RAYCAST MODE OVERLAY ---
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glDisable(GL_DEPTH_TEST);
+
+		svoShader->use();
+		svoShader->setVec3("cameraPos", camera.position);
+		glm::mat4 invVP = glm::inverse(persp_proj * view);
+		svoShader->setMat4("invViewProj", invVP);
+		
+		if (svo && svo->nodeSSBO) {
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, svo->nodeSSBO);
+		}
+		
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D, gBuffer->gAlbedoSpec);
+		svoShader->setInt("gAlbedo", 1);
+
+		renderQuad();
+		glEnable(GL_DEPTH_TEST);
+	}
+
 	renderGUI();
 	glutSwapBuffers();
 }
@@ -342,19 +373,22 @@ void init()
 	shader = new Shader("simpleVertexShader.txt", "simpleFragmentShader.txt");
 	gShader = new Shader("gbuffer_vs.glsl", "gbuffer_fs.glsl");
 	rectShader = new Shader("rect_vs.glsl", "rect_fs.glsl");
+	svoShader = new Shader("rect_vs.glsl", "svo_raycast_fs.glsl"); 
 	gBuffer = new GBuffer(width, height);
-
-	// Camera start position — inside the Sponza atrium
-	camera.position  = glm::vec3(0.0f, 2.0f, 0.0f);
-	camera.direction = glm::vec3(0.0f, 0.0f, -1.0f);
 
 	// Sponza
 	std::cout << "Loading Sponza..." << std::endl;
 	sponza = new Model("sponza/Sponza.gltf", glm::vec3(0.0f, 0.0f, 0.0f), shader);
 	sponza->model = glm::scale(glm::mat4(1.0f), glm::vec3(0.05f));
-	std::cout << "Sponza meshes: " << sponza->meshes.size() << std::endl;
-	for (size_t i = 0; i < sponza->meshes.size(); i++)
-		std::cout << "  Mesh " << i << " textures: " << sponza->meshes[i].textures.size() << std::endl;
+
+	// SVO
+	svo = new SVO();
+	if (sponza) SVOBuilder::build(sponza, 256, *svo);
+	svo->initGPU();
+
+	// Camera start position — inside the Sponza atrium
+	camera.position  = glm::vec3(0.0f, 2.0f, 0.0f);
+	camera.direction = glm::vec3(0.0f, 0.0f, -1.0f);
 }
 
 void cleanup() {
