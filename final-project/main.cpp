@@ -35,10 +35,10 @@ namespace std {
 // Project includes
 #include "shader.h"
 #include "model.h"
-#include "directionallight.h"
 #include "gbuffer.h"
 #include "svo_builder.h"
 #include "svo.h"
+#include "light_view_map.h"
 
 #include "imgui.h"
 #include "imgui_impl_glut.h"
@@ -74,13 +74,16 @@ Shader* shader = nullptr;
 Shader* gShader = nullptr;
 Shader* rectShader = nullptr;
 Shader* svoShader = nullptr;
+Shader* lightViewShader = nullptr;
+Shader* radianceShader = nullptr;
+Shader* radianceFilteringShader = nullptr;
 GBuffer* gBuffer = nullptr;
-DirectionalLight* lightSource = nullptr;
+LightViewMap* lightViewMap = nullptr;
 Model* sponza = nullptr;
 SVO* svo = nullptr;
 
 GLuint quadVAO = 0, quadVBO;
-int displayMode = 0; // 0: Combined, 1: Pos, 2: Norm, 3: Albedo, 4: SVO Raycast
+int displayMode = 0; // 0: Combined, 1: Pos, 2: Norm, 3: Albedo, 4: SVO Raycast, 5: Light View
 
 bool showGUI = false;
 
@@ -220,13 +223,15 @@ void renderGUI() {
 
 		ImGui::Text("Camera: (%.1f, %.1f, %.1f)", camera.position.x, camera.position.y, camera.position.z);
 		ImGui::Separator();
-		ImGui::Combo("Display Mode", &displayMode, "Final\0Position\0Normal\0Albedo\0SVO Raycast\0\0");
+		ImGui::Combo("Display Mode", &displayMode, "Final\0Position\0Normal\0Albedo\0SVO Raycast\0Light View\0\0");
 		if (ImGui::Button("Rebuild SVO")) {
 			if (sponza && svo) SVOBuilder::build(sponza, 256, *svo);
 			if (svo) svo->initGPU();
 		}
 		ImGui::DragFloat("Normal Map", &normal, 0.1f, 0.0f, 10.0f);
-		ImGui::DragFloat3("Light Position", lightPos, 0.1f);
+		if (ImGui::DragFloat3("Light Position", lightPos, 0.5f)) {
+			if (lightViewMap) lightViewMap->updateMatrices(glm::vec3(lightPos[0], lightPos[1], lightPos[2]), glm::vec3(0.0f, 0.0f, 0.0f));
+		}
 		if (sponza) {
 			static float s = 0.05f;
 			if (ImGui::DragFloat("Sponza Scale", &s, 0.001f, 0.001f, 1.0f)) {
@@ -266,6 +271,74 @@ void renderQuad() {
 }
 
 void display() {
+	// --- LIGHT-VIEW MAP PASS ---
+	if (lightViewMap && lightViewShader) {
+		lightViewMap->bindForWriting();
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glEnable(GL_DEPTH_TEST);
+		glDisable(GL_BLEND);
+
+		lightViewShader->use();
+		lightViewShader->setMat4("lightProj", lightViewMap->lightProj);
+		lightViewShader->setMat4("lightView", lightViewMap->lightView);
+		
+		if (sponza) sponza->Draw(lightViewShader);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glViewport(0, 0, width, height); // Restore viewport
+
+		// --- RADIANCE INJECTION PASS ---
+		if (svo && radianceShader) {
+			radianceShader->use();
+			radianceShader->setMat4("lightViewProj", lightViewMap->lightProj * lightViewMap->lightView);
+			radianceShader->setVec3("lightDir", glm::normalize(glm::vec3(0.0f, 0.0f, 0.0f) - glm::vec3(lightPos[0], lightPos[1], lightPos[2])));
+			radianceShader->setVec3("lightColor", glm::vec3(1.0f, 1.0f, 1.0f));
+			radianceShader->setUInt("numLeaves", (unsigned int)svo->colors.size());
+
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, lightViewMap->depthMap);
+			radianceShader->setInt("shadowMap", 0);
+			radianceShader->setVec3("lightColor", glm::vec3(1.5f, 1.5f, 1.4f)); // Strong sun
+			radianceShader->setUInt("numLeaves", (uint32_t)svo->colors.size());
+
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D, lightViewMap->radianceMap);
+			radianceShader->setInt("albedoMap", 1);
+
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, svo->colorSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svo->normalSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, svo->positionSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, svo->radianceSSBO);
+
+			int numGroups = ((int)svo->colors.size() + 255) / 256;
+			glDispatchCompute(numGroups, 1, 1);
+			glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+		}
+
+		// --- RADIANCE FILTERING PASS (MIB-MAPPING) ---
+		if (svo && !svo->levelOffsets.empty() && radianceFilteringShader) {
+			radianceFilteringShader->use();
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, svo->nodeSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, svo->radianceSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svo->filteredRadianceSSBO);
+
+			// Bottom-up pass
+			for (int i = (int)svo->levelOffsets.size() - 1; i >= 0; i--) {
+				uint32_t levelStart = svo->levelOffsets[i];
+				uint32_t levelEnd = (i == (int)svo->levelOffsets.size() - 1) ? (uint32_t)svo->nodes.size() : svo->levelOffsets[i + 1];
+				uint32_t levelSize = levelEnd - levelStart;
+
+				if (levelSize > 0) {
+					radianceFilteringShader->setUInt("levelStart", levelStart);
+					radianceFilteringShader->setUInt("levelSize", levelSize);
+					int numGroups = (levelSize + 255) / 256;
+					glDispatchCompute(numGroups, 1, 1);
+					glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+				}
+			}
+		}
+	}
+
 	if (displayMode == 0) {
 		// --- FINAL MODE: Normal Forward Rendering ---
 		glEnable(GL_DEPTH_TEST);
@@ -275,10 +348,29 @@ void display() {
 		shader->use();
 		shader->setMat4("proj",  persp_proj);
 		shader->setMat4("view",  view);
-		shader->setMat4("model", sponza->model); // Explicitly set model matrix
+		shader->setMat4("model", sponza->model); 
 		shader->setFloat("normalMapIntensity", normal);
-		// shader expects vec4 for LightPosition
+		shader->setVec3("viewPos", camera.position);
+		shader->setMat4("lightViewProj", lightViewMap->lightProj * lightViewMap->lightView);
+		
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, lightViewMap->depthMap);
+		shader->setInt("shadowMap", 2);
+
+		// Directional Light: direction from lightPos to origin
+		glm::vec3 lightDirection = glm::normalize(glm::vec3(0.0f) - glm::vec3(lightPos[0], lightPos[1], lightPos[2]));
+		shader->setVec3("DirectLightDir", lightDirection);
+		
+		// shader expects vec4 for LightPosition (still passed for compatibility if needed)
 		glUniform4f(glGetUniformLocation(shader->ID, "LightPosition"), lightPos[0], lightPos[1], lightPos[2], 1.0f);
+
+		if (svo && svo->nodeSSBO) {
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, svo->nodeSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, svo->radianceSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, svo->filteredRadianceSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, svo->neighborSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, svo->contourSSBO);
+		}
 
 		if (sponza) sponza->Draw();
 	} else if (displayMode >= 1 && displayMode <= 4) {
@@ -333,11 +425,32 @@ void display() {
 		
 		if (svo && svo->nodeSSBO) {
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, svo->nodeSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, svo->neighborSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, svo->contourSSBO);
+		}
+		
+		if (svo && svo->radianceSSBO) {
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, svo->radianceSSBO);
 		}
 		
 		glActiveTexture(GL_TEXTURE1);
 		glBindTexture(GL_TEXTURE_2D, gBuffer->gAlbedoSpec);
 		svoShader->setInt("gAlbedo", 1);
+
+		renderQuad();
+		glEnable(GL_DEPTH_TEST);
+	}
+
+	if (displayMode == 5) {
+		// --- LIGHT VIEW VISUALIZATION ---
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glDisable(GL_DEPTH_TEST);
+
+		rectShader->use();
+		rectShader->setInt("screenTexture", 0);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, lightViewMap->radianceMap);
 
 		renderQuad();
 		glEnable(GL_DEPTH_TEST);
@@ -374,7 +487,15 @@ void init()
 	gShader = new Shader("gbuffer_vs.glsl", "gbuffer_fs.glsl");
 	rectShader = new Shader("rect_vs.glsl", "rect_fs.glsl");
 	svoShader = new Shader("rect_vs.glsl", "svo_raycast_fs.glsl"); 
+	lightViewShader = new Shader("light_view_vs.glsl", "light_view_fs.glsl");
+	radianceShader = new Shader("radiance_injection.glsl");
+	radianceFilteringShader = new Shader("radiance_filtering.glsl");
 	gBuffer = new GBuffer(width, height);
+	lightViewMap = new LightViewMap(1024, 1024);
+
+	// Light position initialization (shining down from above)
+	lightPos[0] = 5.0f; lightPos[1] = 25.0f; lightPos[2] = 2.0f;
+	lightViewMap->updateMatrices(glm::vec3(lightPos[0], lightPos[1], lightPos[2]), glm::vec3(0.0f, 0.0f, 0.0f));
 
 	// Sponza
 	std::cout << "Loading Sponza..." << std::endl;
@@ -383,7 +504,7 @@ void init()
 
 	// SVO
 	svo = new SVO();
-	if (sponza) SVOBuilder::build(sponza, 256, *svo);
+	if (sponza) SVOBuilder::build(sponza, 512, *svo);
 	svo->initGPU();
 
 	// Camera start position — inside the Sponza atrium
@@ -398,7 +519,11 @@ void cleanup() {
 	delete shader;
 	delete gShader;
 	delete rectShader;
+	delete lightViewShader;
+	delete radianceShader;
+	delete radianceFilteringShader;
 	delete gBuffer;
+	delete lightViewMap;
 	delete sponza;
 }
 

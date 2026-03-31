@@ -1,47 +1,226 @@
 #version 430 core
 
 in vec2 TexCoord;
-in mat4 view_matrix;
+in vec3 WorldFragPos;
+in vec3 WorldNormal;
 in vec3 TangentLightPos;
 in vec3 TangentViewPos;
 in vec3 TangentFragPos;
-in vec3 ViewFragPos;
+in mat3 vTBN; // Received from vertex shader
 
 out vec4 FragColor;
 
-// Directional Light Source Properties
-uniform vec3 Ld = vec3(0.7, 0.7, 0.7) ; // Diffuse
-uniform vec3 Ls = vec3(1.0, 1.0, 1.0); // Specular
-uniform vec3 La = vec3(0.25, 0.35, 0.425); // Ambient
+struct ChildDescriptor {
+    uint topology;
+    uint child_ptr;
+    uint leaf_ptr;
+    uint contour_ptr;
+};
 
-// Surface Properties
-uniform vec3 Kd = vec3(1.0, 1.0, 1.0); // Diffuse
-uniform vec3 Ks = vec3(1.0, 1.0, 1.0); // Specular
-uniform vec3 Ka = vec3(1.0, 1.0, 1.0); // Ambient
-uniform float Ns = 10; // Specular Exponent
-uniform float normalMapIntensity;
+struct Neighbors {
+    uint n[6];
+};
+
+struct Contour {
+    vec3 normal;
+    float distance;
+};
+
+layout(std430, binding = 0) buffer NodePool {
+    ChildDescriptor nodes[];
+};
+
+layout(std430, binding = 6) buffer NeighborPool {
+    Neighbors neighborPointers[];
+};
+
+layout(std430, binding = 7) buffer ContourPool {
+    Contour contours[];
+};
+
+layout(std430, binding = 4) buffer LeafRadiancePool {
+    vec4 leafRadiance[];
+};
+
+layout(std430, binding = 5) buffer FilteredRadiancePool {
+    vec4 filteredRadiance[];
+};
+
+uniform vec3 Ld = vec3(1.1, 1.1, 1.0);
+uniform vec3 Ls = vec3(0.3, 0.3, 0.3);
+uniform vec3 La = vec3(0.01, 0.01, 0.012); // Deep shadows
+
+uniform vec3 Kd = vec3(1.0, 1.0, 1.0);
+uniform vec3 Ks = vec3(0.4, 0.4, 0.4);
+uniform vec3 Ka = vec3(1.0, 1.0, 1.0);
+uniform float Ns = 80.0;
+uniform float normalMapIntensity = 1.0;
+uniform float indirectBoost = 2.5;
 
 uniform sampler2D ourTexture;
 uniform sampler2D normalMap;
-void main(){
-	
-	vec3 flatNormal = vec3(0.0, 0.0, 1.0);
-	vec3 normal = texture(normalMap, TexCoord).rgb;
-	normal = normalize(normal * 2.0 - 1.0);
-	normal = normalize(mix(flatNormal, normal, normalMapIntensity));
-	
-	// Ambient Term
-	vec3 Ia = La * Ka;
+uniform sampler2D shadowMap;
 
-	// Difffuse Term
-	vec3 L = normalize(TangentLightPos - TangentFragPos);
-	vec3 Id = Ld * Kd * max(dot(L, normal), 0.0);
+uniform mat4 lightViewProj;
+uniform vec3 DirectLightDir;
+uniform vec3 viewPos;
 
-	// Specular Intensity
-	vec3 V = normalize(TangentViewPos - TangentFragPos);
-	vec3 H = normalize(L + V);
-	vec3 Is = Ls * Ks * pow(max(dot(normal, H), 0.0), Ns);
+const float PI = 3.14159265;
+const float rootSize = 200.0;
+const vec3 minB = vec3(-100.0, -20.0, -100.0);
 
-	FragColor = vec4((Ia + Id + Is) * texture(ourTexture, TexCoord).rgb, 1.0);
-	
-}
+float hash(vec3 p) {
+    return fract(sin(dot(p, vec3(12.9898, 78.233, 45.164))) * 43758.5453);
+}
+
+vec4 sampleSVO(vec3 p, float diameter) {
+    if (any(lessThan(p, minB)) || any(greaterThan(p, minB + rootSize))) return vec4(0.0);
+    
+    uint nodeIdx = 0;
+    vec3 nodeMin = minB;
+    float curSize = rootSize;
+    
+    for (int i = 0; i < 10; i++) {
+        if (curSize <= diameter * 1.5) break; 
+        
+        uint topo = nodes[nodeIdx].topology;
+        uint validMask = (topo >> 24) & 0xFFu;
+        uint leafMask = (topo >> 16) & 0xFFu;
+        uint childPtr = nodes[nodeIdx].child_ptr;
+        
+        if (childPtr == 0) break;
+        
+        float halfSize = curSize * 0.5;
+        int idx = 0;
+        if (p.x >= nodeMin.x + halfSize) { idx |= 1; nodeMin.x += halfSize; }
+        if (p.y >= nodeMin.y + halfSize) { idx |= 2; nodeMin.y += halfSize; }
+        if (p.z >= nodeMin.z + halfSize) { idx |= 4; nodeMin.z += halfSize; }
+        
+        if (((validMask >> idx) & 1u) == 0u) break;
+        if (((leafMask >> idx) & 1u) != 0u) break; 
+        
+        uint internalOffset = 0;
+        for(int j=0; j<idx; j++) if(((validMask >> j) & 1u) != 0u && ((leafMask >> j) & 1u) == 0u) internalOffset++;
+        nodeIdx = childPtr + internalOffset;
+        curSize = halfSize;
+    }
+    
+    vec3 center = nodeMin + curSize * 0.5;
+    vec3 f = (p - center) / curSize; 
+    
+    Neighbors nb = neighborPointers[nodeIdx];
+    uint nX = (f.x > 0.0) ? nb.n[0] : nb.n[1];
+    uint nY = (f.y > 0.0) ? nb.n[2] : nb.n[3];
+    uint nZ = (f.z > 0.0) ? nb.n[4] : nb.n[5];
+    
+    vec4 c = filteredRadiance[nodeIdx];
+    float wx = abs(f.x);
+    float wy = abs(f.y);
+    float wz = abs(f.z);
+    
+    if (nX != 0) c = mix(c, filteredRadiance[nX], wx);
+    if (nY != 0) c = mix(c, filteredRadiance[nY], wy);
+    if (nZ != 0) c = mix(c, filteredRadiance[nZ], wz);
+    
+    return c;
+}
+
+vec4 traceCone(vec3 origin, vec3 dir, float aperture) {
+    float tanHalfAngle = tan(aperture * 0.5);
+    float dist = 4.5; 
+    vec4 acc = vec4(0.0);
+    
+    float j = (hash(origin + dir) - 0.5) * 2.0;
+    dist += j;
+
+    while (dist < 400.0 && acc.a < 0.98) {
+        float diameter = 2.0 * tanHalfAngle * dist;
+        vec3 p = origin + dir * dist;
+        vec4 voxel = sampleSVO(p, diameter);
+        
+        float alpha = voxel.a;
+        acc.rgb += (1.0 - acc.a) * voxel.rgb * alpha;
+        acc.a += (1.0 - acc.a) * alpha;
+        
+        dist += max(diameter * 0.5, 0.7);
+    }
+    return acc;
+}
+
+float calculateShadow(vec3 worldPos, vec3 normal, vec3 lightDirWorld) {
+    vec4 lightSpacePos = lightViewProj * vec4(worldPos, 1.0);
+    vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
+    projCoords = projCoords * 0.5 + 0.5;
+    
+    if (projCoords.z > 1.0) return 0.0;
+    
+    float bias = max(0.015 * (1.0 - dot(normal, lightDirWorld)), 0.005);
+    
+    float shadow = 0.0;
+    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
+    for(int x = -1; x <= 1; ++x) {
+        for(int y = -1; y <= 1; ++y) {
+            float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r; 
+            shadow += projCoords.z - bias > pcfDepth ? 1.0 : 0.0;        
+        }    
+    }
+    shadow /= 9.0;
+    
+    return shadow;
+}
+
+void main() {
+    vec3 worldNormal = normalize(WorldNormal);
+    vec3 lightDirWorld = normalize(-DirectLightDir);
+    
+    // Normal mapping using the actual Mesh TBN matrix
+    vec3 nm = texture(normalMap, TexCoord).rgb;
+    nm = normalize(nm * 2.0 - 1.0);
+    vec3 normal_tangent = normalize(mix(vec3(0,0,1), nm, normalMapIntensity));
+    
+    // Transform tangent-space normal back to world-space using vTBN
+    // NOTE: Sponza normal maps usually have Y-inverted or different orientations,
+    // so using the physical TBN is the most robust way to align them.
+    vec3 world_mapped_normal = normalize(vTBN * normal_tangent);
+    
+    float shadow = calculateShadow(WorldFragPos, worldNormal, lightDirWorld);
+    
+    vec3 diffColor = texture(ourTexture, TexCoord).rgb;
+    float diff = max(dot(world_mapped_normal, lightDirWorld), 0.0);
+    vec3 Id = Ld * diffColor * Kd * diff * (1.0 - shadow);
+    
+    // Specular in light space/world space hybrid
+    vec3 worldV = normalize(viewPos - WorldFragPos); 
+    vec3 H = normalize(lightDirWorld + worldV); 
+    vec3 Is = Ls * Ks * pow(max(dot(world_mapped_normal, H), 0.0), Ns) * (1.0 - shadow);
+
+    const vec3 diffuseCones[6] = {
+        vec3(0.0f, 1.0f, 0.0f),
+        vec3(0.0f, 0.45f, 0.89f),
+        vec3(0.846f, 0.45f, 0.275f),
+        vec3(0.312f, 0.45f, -0.689f),
+        vec3(-0.312f, 0.45f, -0.689f),
+        vec3(-0.846f, 0.45f, 0.275f)
+    };
+    const float diffuseWeights[6] = { PI/4.0, 3.0*PI/20.0, 3.0*PI/20.0, 3.0*PI/20.0, 3.0*PI/20.0, 3.0*PI/20.0 };
+
+    vec3 indirectDiffuse = vec3(0.0);
+    for (int i = 0; i < 6; i++) {
+        // Use world-space TBN reconstruction for cone direction relative to surface normal
+        vec3 up = abs(worldNormal.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0);
+        vec3 tangent = normalize(cross(up, worldNormal));
+        vec3 bitangent = cross(worldNormal, tangent);
+        mat3 tbn_recon = mat3(tangent, bitangent, worldNormal);
+        
+        vec3 coneDir = normalize(tbn_recon * diffuseCones[i]);
+        indirectDiffuse += traceCone(WorldFragPos + worldNormal * 3.0, coneDir, PI/3.0).rgb * diffuseWeights[i];
+    }
+    
+    vec3 finalColor = (La * diffColor) + Id + Is + (indirectDiffuse * Ka * diffColor * indirectBoost);
+    
+    // Tone Mapping & Gamma
+    finalColor = finalColor / (finalColor + vec3(1.0));
+    finalColor = pow(finalColor, vec3(1.0/2.2));
+    
+    FragColor = vec4(finalColor, 1.0);
+}

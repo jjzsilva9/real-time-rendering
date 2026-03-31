@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <vector>
 #include <queue>
+#include <tuple>
 
 struct TempNode {
     bool isLeaf = false;
@@ -111,10 +112,49 @@ bool triBoxOverlap(const glm::vec3& boxcenter, const glm::vec3& boxhalfsize, con
     min = (std::min)((std::min)(v0.z, v1.z), v2.z); max = (std::max)((std::max)(v0.z, v1.z), v2.z);
     if (min > boxhalfsize.z || max < -boxhalfsize.z) return false;
 
-    glm::vec3 normal = glm::cross(e0, e1);
+    glm::vec3 normal = glm::normalize(glm::cross(e0, e1));
     if (!planeBoxOverlap(normal, v0, boxhalfsize)) return false;
 
     return true;
+}
+
+uint32_t getNeighbor(const std::vector<ChildDescriptor>& nodes, uint32_t parentIdx, int octant, int dir, const std::vector<NeighborDescriptor>& existingNeighbors) {
+    // dir: 0:+X, 1:-X, 2:+Y, 3:-Y, 4:+Z, 5:-Z
+    static const int siblingMap[6][8] = {
+        {1, -1, 3, -1, 5, -1, 7, -1}, // +X
+        {-1, 0, -1, 2, -1, 4, -1, 6}, // -X
+        {2, 3, -1, -1, 6, 7, -1, -1}, // +Y
+        {-1, -1, 0, 1, -1, -1, 4, 5}, // -Y
+        {4, 5, 6, 7, -1, -1, -1, -1}, // +Z
+        {-1, -1, -1, -1, 0, 1, 2, 3}  // -Z
+    };
+    
+    int sib = siblingMap[dir][octant];
+    if (sib != -1) {
+        // Neighbor is a sibling within the same parent block
+        // Return index of the sibling in the nodes pool
+        return nodes[parentIdx].child_ptr + sib;
+    }
+    
+    // Neighbor is in a different parent block
+    uint32_t parentNeighbor = existingNeighbors[parentIdx].neighbors[dir];
+    if (parentNeighbor == 0) return 0; // No neighbor at parent level
+    
+    uint32_t parentNeighborChildPtr = nodes[parentNeighbor].child_ptr;
+    if (parentNeighborChildPtr == 0) return 0;
+    
+    // Find the correct child of the parent's neighbor
+    static const int mirrorMap[6][8] = {
+        {1,0,1,0,1,0,1,0}, // +X -> -X octant
+        {1,0,1,0,1,0,1,0}, // -X -> +X octant
+        {2,2,0,0,2,2,0,0}, // +Y
+        {2,2,0,0,2,2,0,0}, // -Y
+        {4,4,4,4,0,0,0,0}, // +Z
+        {4,4,4,4,0,0,0,0}  // -Z
+    };
+    // Actually, X-mirroring means 0 <-> 1, 2 <-> 3, etc.
+    int mirrorOctant = octant ^ (1 << (dir / 2)); 
+    return parentNeighborChildPtr + mirrorOctant;
 }
 
 void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
@@ -152,7 +192,11 @@ void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
 
                         glm::vec3 boxCenter = minB + glm::vec3(vx, vy, vz) * voxelW + boxHalfSize;
                         if (triBoxOverlap(boxCenter, boxHalfSize, tri)) {
-                            denseGrid[idx] = { true, glm::vec3(1.0f), glm::normalize(glm::cross(tri[1] - tri[0], tri[2] - tri[0])) };
+                            glm::vec3 color = glm::vec3(1.0f);
+                            if (!mesh.textures.empty()) color = mesh.textures[0].material.Kd;
+                            glm::vec3 triNormal = glm::normalize(glm::cross(tri[1] - tri[0], tri[2] - tri[0]));
+                            float triDist = glm::dot(triNormal, tri[0]);
+                            denseGrid[idx] = { true, color, triNormal, boxCenter, triNormal, triDist };
                         }
                     }
                 }
@@ -188,27 +232,42 @@ void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
 
     std::cout << "[SVO] Unique voxels: " << uniqueVoxels << ". Serializing..." << std::endl;
 
-    std::queue<std::pair<TempNode*, uint32_t>> queue;
-    outSvo.nodes.push_back({0, 0}); 
-    queue.push({root, 0});
+    std::queue<std::tuple<TempNode*, uint32_t, int>> queue; // node, poolIdx, octant
+    outSvo.nodes.push_back({0, 0, 0, 0}); 
+    outSvo.neighborPointers.push_back({0,0,0,0,0,0});
+    queue.push(std::make_tuple(root, 0, 0));
 
+    uint32_t nodesInCurrentLevel = 1;
+    uint32_t nodesInNextLevel = 0;
+    outSvo.levelOffsets.push_back(0); // Start of Root level (0)
+#pragma warning(disable : 4456)
     while (!queue.empty()) {
-        std::pair<TempNode*, uint32_t> front = queue.front(); 
+        auto front = queue.front(); 
         queue.pop();
-        TempNode* parentTemp = front.first;
-        uint32_t poolIdx = front.second;
+        nodesInCurrentLevel--;
+
+        TempNode* parentTemp = std::get<0>(front);
+        uint32_t poolIdx = std::get<1>(front);
+        int myOctant = std::get<2>(front);
 
         uint8_t valid = 0, leaf = 0;
-        std::vector<TempNode*> nonLeafChildren;
+        std::vector<std::pair<TempNode*, int>> nonLeafChildren;
+        uint32_t leafStartIdx = (uint32_t)outSvo.colors.size();
         for (int i = 0; i < 8; i++) {
             if (parentTemp->children[i]) {
                 valid |= (1 << i);
                 if (parentTemp->children[i]->isLeaf) {
                     leaf |= (1 << i);
-                    outSvo.colors.push_back(0xFFFFFFFF); 
+                    glm::vec3 c = parentTemp->children[i]->data.color;
+                    uint32_t rgba = ((uint32_t)(c.r * 255) << 24) | ((uint32_t)(c.g * 255) << 16) | ((uint32_t)(c.b * 255) << 8) | 0xFF;
+                    outSvo.colors.push_back(rgba); 
                     outSvo.normals.push_back(parentTemp->children[i]->data.normal);
+                    outSvo.positions.push_back(parentTemp->children[i]->data.position);
+
+                    uint32_t cIdx = (uint32_t)outSvo.contours.size();
+                    outSvo.contours.push_back({ parentTemp->children[i]->data.planeNormal, parentTemp->children[i]->data.planeDistance });
                 } else {
-                    nonLeafChildren.push_back(parentTemp->children[i]);
+                    nonLeafChildren.push_back({parentTemp->children[i], (int)i});
                 }
             }
         }
@@ -217,16 +276,36 @@ void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
             uint32_t childBlockStart = (uint32_t)outSvo.nodes.size();
             outSvo.nodes[poolIdx].topology = ChildDescriptor::makeTopology(valid, leaf);
             outSvo.nodes[poolIdx].child_ptr = childBlockStart;
-            for (auto* child : nonLeafChildren) {
+            outSvo.nodes[poolIdx].leaf_ptr = leafStartIdx;
+            outSvo.nodes[poolIdx].contour_ptr = leafStartIdx; 
+
+            for (auto& childPair : nonLeafChildren) {
+                TempNode* child = childPair.first;
+                int octant = childPair.second;
                 uint32_t cIdx = (uint32_t)outSvo.nodes.size();
-                outSvo.nodes.push_back({0, 0});
-                queue.push({child, cIdx});
+                outSvo.nodes.push_back({0, 0, 0, 0});
+                
+                NeighborDescriptor nd;
+                for (int d = 0; d < 6; d++) {
+                    nd.neighbors[d] = getNeighbor(outSvo.nodes, poolIdx, octant, d, outSvo.neighborPointers);
+                }
+                outSvo.neighborPointers.push_back(nd);
+                queue.push(std::make_tuple(child, cIdx, octant));
             }
+            nodesInNextLevel += (uint32_t)nonLeafChildren.size();
         } else {
             outSvo.nodes[poolIdx].topology = ChildDescriptor::makeTopology(valid, leaf);
             outSvo.nodes[poolIdx].child_ptr = 0;
+            outSvo.nodes[poolIdx].leaf_ptr = leafStartIdx;
+            outSvo.nodes[poolIdx].contour_ptr = leafStartIdx;
+        }
+
+        if (nodesInCurrentLevel == 0 && nodesInNextLevel > 0) {
+            outSvo.levelOffsets.push_back((uint32_t)outSvo.nodes.size() - nodesInNextLevel);
+            nodesInCurrentLevel = nodesInNextLevel;
+            nodesInNextLevel = 0;
         }
     }
-    std::cout << "[SVO] Final Nodes: " << outSvo.nodes.size() << std::endl;
+    std::cout << "[SVO] Serialization complete. Final Nodes: " << outSvo.nodes.size() << " Deepest Level: " << outSvo.levelOffsets.size() << std::endl;
     deleteTempTree(root);
 }

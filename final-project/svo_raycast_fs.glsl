@@ -6,10 +6,33 @@ out vec4 FragColor;
 struct ChildDescriptor {
     uint topology;
     uint child_ptr;
+    uint leaf_ptr;
+    uint contour_ptr;
+};
+
+struct Neighbors {
+    uint n[6];
+};
+
+struct Contour {
+    vec3 normal;
+    float distance;
 };
 
 layout(std430, binding = 0) buffer NodePool {
     ChildDescriptor nodes[];
+};
+
+layout(std430, binding = 6) buffer NeighborPool {
+    Neighbors neighborPointers[];
+};
+
+layout(std430, binding = 7) buffer ContourPool {
+    Contour contours[];
+};
+
+layout(std430, binding = 4) buffer RadiancePool {
+    vec4 radiance[];
 };
 
 uniform vec3 cameraPos;
@@ -99,12 +122,40 @@ void main() {
 
             if (((validMask >> idx) & 1u) != 0u) {
                 if (((leafMask >> idx) & 1u) != 0u) {
+                    uint leafOffset = 0;
+                    for(int i = 0; i < idx; i++) {
+                        if(((leafMask >> i) & 1u) != 0u) leafOffset++;
+                    }
+                    uint leafIdx = nodes[parentIdx].leaf_ptr + leafOffset;
+                    vec4 rad = radiance[leafIdx];
+                    
+                    // ESVO Contour Hit Test
+                    uint contourIdx = nodes[parentIdx].contour_ptr + leafOffset;
+                    Contour c = contours[contourIdx];
+                    
+                    float denom = dot(c.normal, d);
+                    if (abs(denom) > 1e-6) {
+                        float t_plane = (c.distance - dot(c.normal, p)) / denom;
+                        if (t_plane >= tv_min && t_plane <= tv_max) {
+                            real_tv_min = t_plane;
+                        }
+                    }
+
+                    vec3 color = rad.rgb;
+                    
+                    // Wireframe logic (from previous version)
                     vec3 hitP = p + real_tv_min * d;
                     vec3 localPos = (hitP - fVoxMin) / (fVoxMax - fVoxMin + 1e-6);
                     vec3 distToEdge = min(localPos, 1.0 - localPos);
                     float d2 = max(min(distToEdge.x, distToEdge.y), min(max(distToEdge.x, distToEdge.y), distToEdge.z));
-                    if (d2 < 0.04) FragColor = vec4(1.0, 0.9, 0.0, 1.0); 
-                    else FragColor = mix(sceneColor, vec4(vec3(0.5 - (real_tv_min - t_min)/100.0), 1.0), 0.3);
+                    
+                    if (d2 < 0.04) {
+                        // Yellowish wireframe on top of radiance
+                        FragColor = vec4(mix(color, vec3(1.0, 0.9, 0.0), 0.8), 1.0); 
+                    } else {
+                        FragColor = vec4(color, 1.0);
+                    }
+                    
                     return;
                 } else {
                     if (scale < MAX_DEPTH - 1) {
