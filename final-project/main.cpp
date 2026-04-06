@@ -97,6 +97,7 @@ float coneApertureDeg  = 60.0f; // displayed in degrees, sent to shader as radia
 int   numCones         = 6;
 float indirectBoost    = 2.5f;
 float specularBoost    = 1.0f;
+float phongNs          = 80.0f;
 
 int   shadowMapRes     = 1024; // shadow map / light-view map resolution
 
@@ -273,6 +274,7 @@ void renderGUI() {
 		ImGui::SliderInt("Num Cones", &numCones, 1, 6);
 		ImGui::SliderFloat("Indirect Boost", &indirectBoost, 0.0f, 2.5f);
 		ImGui::SliderFloat("Specular Boost", &specularBoost, 0.0f, 1.0f);
+		ImGui::SliderFloat("Shininess (Ns)", &phongNs, 1.0f, 512.0f);
 
 		ImGui::Separator();
 		if (ImGui::DragFloat3("Light Position", lightPos, 0.5f)) {
@@ -444,6 +446,10 @@ void display() {
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		glEnable(GL_DEPTH_TEST);
 		glDisable(GL_BLEND);
+		// Disable face culling so back-facing triangles write depth.
+		// Without this, interior walls (whose normals face inward) are culled,
+		// leaving shadow map texels at 1.0 — making voxels behind those walls appear lit.
+		glDisable(GL_CULL_FACE);
 
 		lightViewShader->use();
 		lightViewShader->setMat4("lightProj", lightViewMap->lightProj);
@@ -526,6 +532,7 @@ void display() {
 		shader->setInt("numCones", numCones);
 		shader->setFloat("indirectBoost", indirectBoost);
 		shader->setFloat("specularBoost", specularBoost);
+		shader->setFloat("Ns", phongNs);
 		shader->setFloat("svoVoxelSize", 200.0f / (float)svoResolution);
 		
 		glActiveTexture(GL_TEXTURE2);

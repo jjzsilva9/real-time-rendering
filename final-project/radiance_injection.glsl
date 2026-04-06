@@ -6,12 +6,14 @@ layout(std430, binding = 1) buffer AlbedoPool {
     uint albedos[];
 };
 
+// vec3 in std430 has 16-byte stride, but C++ glm::vec3 is 12 bytes (tightly packed).
+// Use float arrays to guarantee the correct 12-byte stride matching the C++ layout.
 layout(std430, binding = 2) buffer NormalPool {
-    vec3 normals[];
+    float normals[];
 };
 
 layout(std430, binding = 3) buffer PositionPool {
-    vec3 positions[];
+    float positions[];
 };
 
 layout(std430, binding = 4) buffer RadiancePool {
@@ -36,8 +38,8 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= numLeaves) return;
 
-    vec3 worldPos = positions[idx];
-    vec3 normal   = normals[idx];
+    vec3 worldPos = vec3(positions[idx*3], positions[idx*3+1], positions[idx*3+2]);
+    vec3 normal   = vec3(normals[idx*3],   normals[idx*3+1],   normals[idx*3+2]);
     vec3 albedo   = unpackColor(albedos[idx]);
 
     // Build a tangent frame in the light's perpendicular plane for sample offsets.
@@ -72,7 +74,10 @@ void main() {
             }
 
             float diff  = max(dot(normal, -lightDir), 0.0);
-            float bias  = max(0.01 * (1.0 - diff), 0.002);
+            // Bias must be in normalized depth space. For ortho near=0.1, far=500:
+            // 0.0001 NDC = ~0.05 world units — sub-voxel precision even at 128 res.
+            // The old 0.002 minimum = ~1 world unit, lighting voxels a full voxel behind occluders.
+            float bias  = max(0.0001 * (1.0 - diff), 0.00005);
             float depth = texture(shadowMap, projCoords.xy).r;
             float lit   = (projCoords.z <= depth + bias && diff > 0.01) ? 1.0 : 0.0;
 

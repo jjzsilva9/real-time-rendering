@@ -21,10 +21,8 @@ struct Neighbors {
     uint n[6];
 };
 
-struct Contour {
-    vec3 normal;
-    float distance;
-};
+// Contour is stored as vec4 (xyz=normal, w=distance) to match C++ layout (16 bytes).
+// GLSL struct { vec3; float; } would be 32 bytes in std430 due to vec3's 16-byte alignment.
 
 layout(std430, binding = 0) buffer NodePool {
     ChildDescriptor nodes[];
@@ -35,7 +33,7 @@ layout(std430, binding = 6) buffer NeighborPool {
 };
 
 layout(std430, binding = 7) buffer ContourPool {
-    Contour contours[];
+    vec4 contours[]; // xyz=normal, w=distance
 };
 
 layout(std430, binding = 4) buffer LeafRadiancePool {

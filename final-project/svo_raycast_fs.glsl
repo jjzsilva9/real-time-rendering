@@ -14,10 +14,10 @@ struct Neighbors {
     uint n[6];
 };
 
-struct Contour {
-    vec3 normal;
-    float distance;
-};
+// Contour: vec3 normal (12 bytes) + float distance (4 bytes) = 16 bytes in C++.
+// GLSL std430 would pad this to 32 bytes due to vec3's 16-byte base alignment.
+// Use a vec4 to match the C++ layout exactly: xyz=normal, w=distance.
+// layout(std430, binding = 7) buffer ContourPool reads vec4 contours[] below.
 
 layout(std430, binding = 0) buffer NodePool {
     ChildDescriptor nodes[];
@@ -28,7 +28,7 @@ layout(std430, binding = 6) buffer NeighborPool {
 };
 
 layout(std430, binding = 7) buffer ContourPool {
-    Contour contours[];
+    vec4 contours[]; // xyz = normal, w = distance; matches C++ Contour (16 bytes, no padding)
 };
 
 layout(std430, binding = 4) buffer RadiancePool {
@@ -131,11 +131,13 @@ void main() {
                     
                     // ESVO Contour Hit Test
                     uint contourIdx = nodes[parentIdx].contour_ptr + leafOffset;
-                    Contour c = contours[contourIdx];
-                    
-                    float denom = dot(c.normal, d);
+                    vec4 c = contours[contourIdx];
+                    vec3 cNormal = c.xyz;
+                    float cDist  = c.w;
+
+                    float denom = dot(cNormal, d);
                     if (abs(denom) > 1e-6) {
-                        float t_plane = (c.distance - dot(c.normal, p)) / denom;
+                        float t_plane = (cDist - dot(cNormal, p)) / denom;
                         if (t_plane >= tv_min && t_plane <= tv_max) {
                             real_tv_min = t_plane;
                         }
