@@ -237,6 +237,7 @@ void renderGUI() {
 	if (showGUI) {
 		ImGui::Begin("Controls", &showGUI, ImGuiWindowFlags_AlwaysAutoResize);
 
+		ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 		ImGui::Text("Camera: (%.1f, %.1f, %.1f)", camera.position.x, camera.position.y, camera.position.z);
 		ImGui::Separator();
 		ImGui::Combo("Display Mode", &displayMode, "Final\0Position\0Normal\0Albedo\0SVO Raycast\0Light View\0\0");
@@ -273,7 +274,7 @@ void renderGUI() {
 		ImGui::SliderFloat("Aperture (deg)", &coneApertureDeg, 10.0f, 90.0f);
 		ImGui::SliderInt("Num Cones", &numCones, 1, 6);
 		ImGui::SliderFloat("Indirect Boost", &indirectBoost, 0.0f, 2.5f);
-		ImGui::SliderFloat("Specular Boost", &specularBoost, 0.0f, 1.0f);
+		ImGui::SliderFloat("Specular Boost", &specularBoost, 0.0f, 2.5f);
 		ImGui::SliderFloat("Shininess (Ns)", &phongNs, 1.0f, 512.0f);
 
 		ImGui::Separator();

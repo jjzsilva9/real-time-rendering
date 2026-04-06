@@ -40,7 +40,6 @@ void main() {
 
     vec3 worldPos = vec3(positions[idx*3], positions[idx*3+1], positions[idx*3+2]);
     vec3 normal   = vec3(normals[idx*3],   normals[idx*3+1],   normals[idx*3+2]);
-    vec3 albedo   = unpackColor(albedos[idx]);
 
     // Build a tangent frame in the light's perpendicular plane for sample offsets.
     // Samples are spread across the voxel's footprint so shadow edges are soft and
@@ -51,6 +50,13 @@ void main() {
     vec3 lightUp = cross(lightRight, -lightDir);
 
     float n = float(numPhotons);
+    // Sample surface albedo from the light-view color buffer at the voxel center.
+    // This gives the real texture color rather than the flat material Kd,
+    // enabling correct color bleeding (red walls bleed red, etc.)
+    vec4 centerLS = lightViewProj * vec4(worldPos, 1.0);
+    vec3 centerUV = (centerLS.xyz / centerLS.w) * 0.5 + 0.5;
+    vec3 surfaceAlbedo = (centerUV.z <= 1.0) ? texture(albedoMap, centerUV.xy).rgb : vec3(1.0);
+
     float totalDiff   = 0.0;
     float totalVis    = 0.0;
     float totalWeight = 0.0;
@@ -74,9 +80,6 @@ void main() {
             }
 
             float diff  = max(dot(normal, -lightDir), 0.0);
-            // Bias must be in normalized depth space. For ortho near=0.1, far=500:
-            // 0.0001 NDC = ~0.05 world units — sub-voxel precision even at 128 res.
-            // The old 0.002 minimum = ~1 world unit, lighting voxels a full voxel behind occluders.
             float bias  = max(0.0001 * (1.0 - diff), 0.00005);
             float depth = texture(shadowMap, projCoords.xy).r;
             float lit   = (projCoords.z <= depth + bias && diff > 0.01) ? 1.0 : 0.0;
@@ -98,7 +101,9 @@ void main() {
     if (avgVis <= 0.0) {
         radiance[idx] = vec4(0.0, 0.0, 0.0, 1.0);
     } else {
-        vec3 color = albedo * lightColor * avgDiff;
+        // avgDiff already folds in NdotL and visibility; surfaceAlbedo comes from the
+        // light-view texture so it carries the real surface color for color bleeding.
+        vec3 color = surfaceAlbedo * lightColor * avgDiff;
         radiance[idx] = vec4(color, 1.0);
     }
 }
