@@ -55,10 +55,11 @@ uniform vec3 Ks = vec3(0.4, 0.4, 0.4);
 uniform vec3 Ka = vec3(1.0, 1.0, 1.0);
 uniform float Ns = 80.0;
 uniform float normalMapIntensity = 1.0;
-uniform float indirectBoost = 2.5;
-uniform float coneAperture    = 1.0472; // PI/3 radians = 60 degrees
-uniform int   numCones        = 6;
-uniform float svoVoxelSize    = 1.5625; // rootSize / svoResolution, updated from CPU
+uniform float indirectBoost  = 2.5;
+uniform float specularBoost  = 1.0;
+uniform float coneAperture   = 1.0472; // PI/3 radians = 60 degrees
+uniform int   numCones       = 6;
+uniform float svoVoxelSize   = 1.5625; // rootSize / svoResolution, updated from CPU
 
 uniform sampler2D ourTexture;
 uniform sampler2D normalMap;
@@ -242,8 +243,24 @@ void main() {
     }
     // Normalize by total solid-angle weight so energy is independent of cone count
     if (totalWeight > 0.0) indirectDiffuse /= totalWeight;
-    
-    vec3 finalColor = (La * diffColor) + Id + Is + (indirectDiffuse * Ka * diffColor * indirectBoost);
+
+    // --- Specular cone (Crassin et al. 2011, Section 8.1) ---
+    // Aperture derived from Phong exponent: tighter lobe = smaller aperture.
+    // ψ ≈ sqrt(2 / Ns) gives the half-angle at which the Phong lobe decays to ~e^-1.
+    // Clamped so very low Ns (diffuse-ish) doesn't produce an absurdly wide specular cone.
+    vec3 indirectSpecular = vec3(0.0);
+    if (specularBoost > 0.0) {
+        float specAperture = clamp(sqrt(2.0 / max(Ns, 1.0)), 0.02, PI * 0.5);
+        vec3 reflDir = reflect(-worldV, world_mapped_normal);
+        // Only trace if reflection points away from the surface
+        if (dot(reflDir, world_mapped_normal) > 0.0) {
+            indirectSpecular = traceCone(coneOrigin, reflDir, specAperture).rgb;
+        }
+    }
+
+    vec3 finalColor = (La * diffColor) + Id + Is
+        + (indirectDiffuse  * Ka * diffColor * indirectBoost)
+        + (indirectSpecular * Ks            * specularBoost);
     
     // Tone Mapping & Gamma
     finalColor = finalColor / (finalColor + vec3(1.0));

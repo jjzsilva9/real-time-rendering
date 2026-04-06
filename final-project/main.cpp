@@ -96,7 +96,9 @@ int   svoResolution    = 128;
 float coneApertureDeg  = 60.0f; // displayed in degrees, sent to shader as radians
 int   numCones         = 6;
 float indirectBoost    = 2.5f;
-int   numPhotons       = 1;    // samples per axis for radiance injection (total = numPhotons^2)
+float specularBoost    = 1.0f;
+
+int   shadowMapRes     = 1024; // shadow map / light-view map resolution
 
 // Dynamic objects
 struct DynObject { glm::vec3 basePos; float spawnTime; };
@@ -252,15 +254,25 @@ void renderGUI() {
 		}
 
 		ImGui::Separator();
-		ImGui::Text("Radiance Injection");
-		ImGui::SliderInt("Photons/voxel (NxN)", &numPhotons, 1, 8);
-		ImGui::SameLine(); ImGui::TextDisabled("(%d samples)", numPhotons * numPhotons);
+		ImGui::Text("Shadow Map");
+		{
+			static int smIdx = 1; // default 1024
+			const char* smItems[] = { "512", "1024", "2048", "4096" };
+			const int   smValues[] = { 512, 1024, 2048, 4096 };
+			if (ImGui::Combo("Resolution##sm", &smIdx, smItems, 4)) {
+				shadowMapRes = smValues[smIdx];
+				delete lightViewMap;
+				lightViewMap = new LightViewMap(shadowMapRes, shadowMapRes);
+				lightViewMap->updateMatrices(glm::vec3(lightPos[0], lightPos[1], lightPos[2]), glm::vec3(0.0f));
+			}
+		}
 
 		ImGui::Separator();
 		ImGui::Text("Cone Tracing");
 		ImGui::SliderFloat("Aperture (deg)", &coneApertureDeg, 10.0f, 90.0f);
 		ImGui::SliderInt("Num Cones", &numCones, 1, 6);
 		ImGui::SliderFloat("Indirect Boost", &indirectBoost, 0.0f, 2.5f);
+		ImGui::SliderFloat("Specular Boost", &specularBoost, 0.0f, 1.0f);
 
 		ImGui::Separator();
 		if (ImGui::DragFloat3("Light Position", lightPos, 0.5f)) {
@@ -449,7 +461,7 @@ void display() {
 			radianceShader->setVec3("lightDir", glm::normalize(glm::vec3(0.0f, 0.0f, 0.0f) - glm::vec3(lightPos[0], lightPos[1], lightPos[2])));
 			radianceShader->setVec3("lightColor", glm::vec3(1.0f, 1.0f, 1.0f));
 			radianceShader->setUInt("numLeaves", (unsigned int)svo->colors.size());
-			radianceShader->setInt("numPhotons", numPhotons);
+			radianceShader->setInt("numPhotons", 1);
 			radianceShader->setFloat("voxelSize", 200.0f / (float)svoResolution);
 
 			glActiveTexture(GL_TEXTURE0);
@@ -478,6 +490,7 @@ void display() {
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, svo->nodeSSBO);
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, svo->radianceSSBO);
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svo->filteredRadianceSSBO);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, svo->neighborSSBO);
 
 			// Bottom-up pass
 			for (int i = (int)svo->levelOffsets.size() - 1; i >= 0; i--) {
@@ -512,6 +525,7 @@ void display() {
 		shader->setFloat("coneAperture", glm::radians(coneApertureDeg));
 		shader->setInt("numCones", numCones);
 		shader->setFloat("indirectBoost", indirectBoost);
+		shader->setFloat("specularBoost", specularBoost);
 		shader->setFloat("svoVoxelSize", 200.0f / (float)svoResolution);
 		
 		glActiveTexture(GL_TEXTURE2);
