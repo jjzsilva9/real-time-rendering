@@ -11,9 +11,8 @@ public:
     struct VoxelData {
         bool occupied = false;
         glm::vec3 color = glm::vec3(0.0f);
-        glm::vec3 normal = glm::vec3(0.0f);
+        glm::vec3 normal = glm::vec3(0.0f); // also used as ESVO contour normal
         glm::vec3 position = glm::vec3(0.0f);
-        glm::vec3 planeNormal = glm::vec3(0.0f); // ESVO Contour
         float planeDistance = 0.0f; // ESVO Contour
     };
 

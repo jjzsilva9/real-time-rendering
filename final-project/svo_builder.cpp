@@ -118,6 +118,25 @@ bool triBoxOverlap(const glm::vec3& boxcenter, const glm::vec3& boxhalfsize, con
     return true;
 }
 
+// Returns the pool index of targetOctant within nodeIdx's internal child block,
+// or 0 if that octant is absent or is a leaf (no internal node to return).
+static uint32_t internalChildPoolIdx(const std::vector<ChildDescriptor>& nodes, uint32_t nodeIdx, int targetOctant) {
+    uint32_t topo     = nodes[nodeIdx].topology;
+    uint8_t  valid    = (topo >> 24) & 0xFF;
+    uint8_t  leaf     = (topo >> 16) & 0xFF;
+    uint32_t childPtr = nodes[nodeIdx].child_ptr;
+
+    if (!((valid >> targetOctant) & 1)) return 0; // octant is empty
+    if ( ((leaf  >> targetOctant) & 1)) return 0; // octant is a leaf — no internal node
+
+    // Count non-leaf valid children with octant index < targetOctant
+    uint32_t offset = 0;
+    for (int j = 0; j < targetOctant; j++) {
+        if (((valid >> j) & 1) && !((leaf >> j) & 1)) offset++;
+    }
+    return childPtr + offset;
+}
+
 uint32_t getNeighbor(const std::vector<ChildDescriptor>& nodes, uint32_t parentIdx, int octant, int dir, const std::vector<NeighborDescriptor>& existingNeighbors) {
     // dir: 0:+X, 1:-X, 2:+Y, 3:-Y, 4:+Z, 5:-Z
     static const int siblingMap[6][8] = {
@@ -128,33 +147,22 @@ uint32_t getNeighbor(const std::vector<ChildDescriptor>& nodes, uint32_t parentI
         {4, 5, 6, 7, -1, -1, -1, -1}, // +Z
         {-1, -1, -1, -1, 0, 1, 2, 3}  // -Z
     };
-    
+
     int sib = siblingMap[dir][octant];
     if (sib != -1) {
-        // Neighbor is a sibling within the same parent block
-        // Return index of the sibling in the nodes pool
-        return nodes[parentIdx].child_ptr + sib;
+        // Neighbor is a sibling within the same parent block.
+        // Must convert octant index -> packed pool offset (leaf children are not in the pool).
+        return internalChildPoolIdx(nodes, parentIdx, sib);
     }
-    
-    // Neighbor is in a different parent block
+
+    // Neighbor is across the parent boundary — look up the parent's neighbor.
     uint32_t parentNeighbor = existingNeighbors[parentIdx].neighbors[dir];
-    if (parentNeighbor == 0) return 0; // No neighbor at parent level
-    
-    uint32_t parentNeighborChildPtr = nodes[parentNeighbor].child_ptr;
-    if (parentNeighborChildPtr == 0) return 0;
-    
-    // Find the correct child of the parent's neighbor
-    static const int mirrorMap[6][8] = {
-        {1,0,1,0,1,0,1,0}, // +X -> -X octant
-        {1,0,1,0,1,0,1,0}, // -X -> +X octant
-        {2,2,0,0,2,2,0,0}, // +Y
-        {2,2,0,0,2,2,0,0}, // -Y
-        {4,4,4,4,0,0,0,0}, // +Z
-        {4,4,4,4,0,0,0,0}  // -Z
-    };
-    // Actually, X-mirroring means 0 <-> 1, 2 <-> 3, etc.
-    int mirrorOctant = octant ^ (1 << (dir / 2)); 
-    return parentNeighborChildPtr + mirrorOctant;
+    if (parentNeighbor == 0) return 0;
+    if (nodes[parentNeighbor].child_ptr == 0) return 0;
+
+    // The facing child of the parent's neighbor is the mirror octant.
+    int mirrorOctant = octant ^ (1 << (dir / 2));
+    return internalChildPoolIdx(nodes, parentNeighbor, mirrorOctant);
 }
 
 void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
@@ -195,8 +203,10 @@ void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
                             glm::vec3 color = glm::vec3(1.0f);
                             if (!mesh.textures.empty()) color = mesh.textures[0].material.Kd;
                             glm::vec3 triNormal = glm::normalize(glm::cross(tri[1] - tri[0], tri[2] - tri[0]));
-                            float triDist = glm::dot(triNormal, tri[0]);
-                            denseGrid[idx] = { true, color, triNormal, boxCenter, triNormal, triDist };
+                            // Compute plane distance using the voxel center projected onto the triangle plane.
+                            // This keeps the Hermite contour within the voxel's bounds (per ESVO).
+                            float triDist = glm::dot(triNormal, boxCenter);
+                            denseGrid[idx] = { true, color, triNormal, boxCenter, triDist };
                         }
                     }
                 }
@@ -265,7 +275,7 @@ void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
                     outSvo.positions.push_back(parentTemp->children[i]->data.position);
 
                     uint32_t cIdx = (uint32_t)outSvo.contours.size();
-                    outSvo.contours.push_back({ parentTemp->children[i]->data.planeNormal, parentTemp->children[i]->data.planeDistance });
+                    outSvo.contours.push_back({ parentTemp->children[i]->data.normal, parentTemp->children[i]->data.planeDistance });
                 } else {
                     nonLeafChildren.push_back({parentTemp->children[i], (int)i});
                 }

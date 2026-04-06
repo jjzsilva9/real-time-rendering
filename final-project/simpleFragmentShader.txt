@@ -56,6 +56,9 @@ uniform vec3 Ka = vec3(1.0, 1.0, 1.0);
 uniform float Ns = 80.0;
 uniform float normalMapIntensity = 1.0;
 uniform float indirectBoost = 2.5;
+uniform float coneAperture    = 1.0472; // PI/3 radians = 60 degrees
+uniform int   numCones        = 6;
+uniform float svoVoxelSize    = 1.5625; // rootSize / svoResolution, updated from CPU
 
 uniform sampler2D ourTexture;
 uniform sampler2D normalMap;
@@ -75,74 +78,92 @@ float hash(vec3 p) {
 
 vec4 sampleSVO(vec3 p, float diameter) {
     if (any(lessThan(p, minB)) || any(greaterThan(p, minB + rootSize))) return vec4(0.0);
-    
+
     uint nodeIdx = 0;
     vec3 nodeMin = minB;
     float curSize = rootSize;
-    
-    for (int i = 0; i < 10; i++) {
-        if (curSize <= diameter * 1.5) break; 
-        
-        uint topo = nodes[nodeIdx].topology;
+
+    // Minimum world-space node size for GI sampling.
+    // GI spatial resolution beyond ~6 world units is not perceptible — finer nodes
+    // have too few averaged voxels to suppress lit/shadow variance, appearing blotchy.
+    // Higher SVO resolution still improves GI quality by producing more accurate
+    // filtered radiance values at this stopping level.
+    // rootSize/32 = 6.25 world units — matches the natural stopping level at res=128.
+    float minStopSize = max(svoVoxelSize * 4.0, rootSize / 32.0);
+
+    for (int i = 0; i < 12; i++) {
+        // Stop when the voxel fits the cone footprint, or when we've reached the
+        // smoothed mip level regardless of cone size.
+        if (curSize <= max(diameter * 1.5, minStopSize)) break;
+
+        uint topo      = nodes[nodeIdx].topology;
         uint validMask = (topo >> 24) & 0xFFu;
-        uint leafMask = (topo >> 16) & 0xFFu;
-        uint childPtr = nodes[nodeIdx].child_ptr;
-        
+        uint leafMask  = (topo >> 16) & 0xFFu;
+        uint childPtr  = nodes[nodeIdx].child_ptr;
+
+        // All valid children are leaves — filtered radiance at this level is the right estimate.
         if (childPtr == 0) break;
-        
+
         float halfSize = curSize * 0.5;
         int idx = 0;
         if (p.x >= nodeMin.x + halfSize) { idx |= 1; nodeMin.x += halfSize; }
         if (p.y >= nodeMin.y + halfSize) { idx |= 2; nodeMin.y += halfSize; }
         if (p.z >= nodeMin.z + halfSize) { idx |= 4; nodeMin.z += halfSize; }
-        
-        if (((validMask >> idx) & 1u) == 0u) break;
-        if (((leafMask >> idx) & 1u) != 0u) break; 
-        
+
+        // Child octant is empty — this specific region has no geometry, return nothing.
+        if (((validMask >> idx) & 1u) == 0u) return vec4(0.0);
+
+        // Child is a leaf — stop here and use the parent's filtered (density-weighted)
+        // radiance. Returning the raw leaf radiance would give alpha=1.0 which saturates
+        // the cone accumulator on the first hit, producing binary lit/unlit GI.
+        if (((leafMask >> idx) & 1u) != 0u) break;
+
         uint internalOffset = 0;
-        for(int j=0; j<idx; j++) if(((validMask >> j) & 1u) != 0u && ((leafMask >> j) & 1u) == 0u) internalOffset++;
+        for (int j = 0; j < idx; j++)
+            if (((validMask >> j) & 1u) != 0u && ((leafMask >> j) & 1u) == 0u) internalOffset++;
         nodeIdx = childPtr + internalOffset;
         curSize = halfSize;
     }
-    
+
+    // Cone-size stop or all-leaves node: interpolate filtered radiance across axis neighbours.
     vec3 center = nodeMin + curSize * 0.5;
-    vec3 f = (p - center) / curSize; 
-    
+    vec3 f = (p - center) / curSize; // [-0.5, +0.5]
+
     Neighbors nb = neighborPointers[nodeIdx];
     uint nX = (f.x > 0.0) ? nb.n[0] : nb.n[1];
     uint nY = (f.y > 0.0) ? nb.n[2] : nb.n[3];
     uint nZ = (f.z > 0.0) ? nb.n[4] : nb.n[5];
-    
-    vec4 c = filteredRadiance[nodeIdx];
+
     float wx = abs(f.x);
     float wy = abs(f.y);
     float wz = abs(f.z);
-    
-    if (nX != 0) c = mix(c, filteredRadiance[nX], wx);
-    if (nY != 0) c = mix(c, filteredRadiance[nY], wy);
-    if (nZ != 0) c = mix(c, filteredRadiance[nZ], wz);
-    
+    float w0 = (1.0 - wx) * (1.0 - wy) * (1.0 - wz);
+
+    vec4 c = filteredRadiance[nodeIdx] * w0;
+    float totalW = w0;
+    if (nX != 0u) { float w = wx*(1.0-wy)*(1.0-wz); c += filteredRadiance[nX]*w; totalW += w; }
+    if (nY != 0u) { float w = (1.0-wx)*wy*(1.0-wz); c += filteredRadiance[nY]*w; totalW += w; }
+    if (nZ != 0u) { float w = (1.0-wx)*(1.0-wy)*wz; c += filteredRadiance[nZ]*w; totalW += w; }
+    if (totalW > 0.0) c /= totalW;
+
     return c;
 }
 
 vec4 traceCone(vec3 origin, vec3 dir, float aperture) {
     float tanHalfAngle = tan(aperture * 0.5);
-    float dist = 4.5; 
+    float dist = svoVoxelSize; // start one voxel out from the origin
     vec4 acc = vec4(0.0);
-    
-    float j = (hash(origin + dir) - 0.5) * 2.0;
-    dist += j;
 
     while (dist < 400.0 && acc.a < 0.98) {
         float diameter = 2.0 * tanHalfAngle * dist;
         vec3 p = origin + dir * dist;
         vec4 voxel = sampleSVO(p, diameter);
         
-        float alpha = voxel.a;
-        acc.rgb += (1.0 - acc.a) * voxel.rgb * alpha;
-        acc.a += (1.0 - acc.a) * alpha;
+        // filteredRadiance.rgb is premultiplied by density (sum/8), so no extra alpha factor.
+        acc.rgb += (1.0 - acc.a) * voxel.rgb;
+        acc.a += (1.0 - acc.a) * voxel.a;
         
-        dist += max(diameter * 0.5, 0.7);
+        dist += max(diameter * 0.5, svoVoxelSize * 0.5);
     }
     return acc;
 }
@@ -204,17 +225,23 @@ void main() {
     };
     const float diffuseWeights[6] = { PI/4.0, 3.0*PI/20.0, 3.0*PI/20.0, 3.0*PI/20.0, 3.0*PI/20.0, 3.0*PI/20.0 };
 
+    // Build a TBN from the surface normal once (shared across all cones)
+    vec3 up = abs(worldNormal.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0);
+    vec3 tangent   = normalize(cross(up, worldNormal));
+    vec3 bitangent = cross(worldNormal, tangent);
+    mat3 tbn_recon = mat3(tangent, bitangent, worldNormal);
+
+    vec3 coneOrigin = WorldFragPos + worldNormal * svoVoxelSize;
+
     vec3 indirectDiffuse = vec3(0.0);
-    for (int i = 0; i < 6; i++) {
-        // Use world-space TBN reconstruction for cone direction relative to surface normal
-        vec3 up = abs(worldNormal.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0);
-        vec3 tangent = normalize(cross(up, worldNormal));
-        vec3 bitangent = cross(worldNormal, tangent);
-        mat3 tbn_recon = mat3(tangent, bitangent, worldNormal);
-        
+    float totalWeight = 0.0;
+    for (int i = 0; i < numCones; i++) {
         vec3 coneDir = normalize(tbn_recon * diffuseCones[i]);
-        indirectDiffuse += traceCone(WorldFragPos + worldNormal * 3.0, coneDir, PI/3.0).rgb * diffuseWeights[i];
+        indirectDiffuse += traceCone(coneOrigin, coneDir, coneAperture).rgb * diffuseWeights[i];
+        totalWeight += diffuseWeights[i];
     }
+    // Normalize by total solid-angle weight so energy is independent of cone count
+    if (totalWeight > 0.0) indirectDiffuse /= totalWeight;
     
     vec3 finalColor = (La * diffColor) + Id + Is + (indirectDiffuse * Ka * diffColor * indirectBoost);
     

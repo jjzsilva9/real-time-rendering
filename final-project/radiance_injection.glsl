@@ -25,6 +25,8 @@ uniform mat4 lightViewProj;
 uniform vec3 lightDir;
 uniform vec3 lightColor;
 uniform uint numLeaves;
+uniform int  numPhotons;  // samples per axis: total = numPhotons^2
+uniform float voxelSize;  // world-space size of one leaf voxel
 
 vec3 unpackColor(uint c) {
     return vec3(float((c >> 24) & 0xFFu), float((c >> 16) & 0xFFu), float((c >> 8) & 0xFFu)) / 255.0;
@@ -35,32 +37,63 @@ void main() {
     if (idx >= numLeaves) return;
 
     vec3 worldPos = positions[idx];
-    vec3 normal = normals[idx];
-    vec3 albedo = unpackColor(albedos[idx]);
+    vec3 normal   = normals[idx];
+    vec3 albedo   = unpackColor(albedos[idx]);
 
-    // Project into light space
-    vec4 lightSpacePos = lightViewProj * vec4(worldPos, 1.0);
-    vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
-    projCoords = projCoords * 0.5 + 0.5;
+    // Build a tangent frame in the light's perpendicular plane for sample offsets.
+    // Samples are spread across the voxel's footprint so shadow edges are soft and
+    // thin surfaces that miss the single center sample still receive light.
+    vec3 lightRight = normalize(cross(-lightDir, vec3(0.0, 1.0, 0.0)));
+    if (length(lightRight) < 0.001)
+        lightRight = normalize(cross(-lightDir, vec3(1.0, 0.0, 0.0)));
+    vec3 lightUp = cross(lightRight, -lightDir);
 
-    if (projCoords.z > 1.0) {
-        radiance[idx] = vec4(0.0);
+    float n = float(numPhotons);
+    float totalDiff   = 0.0;
+    float totalVis    = 0.0;
+    float totalWeight = 0.0;
+
+    for (int i = 0; i < numPhotons; i++) {
+        for (int j = 0; j < numPhotons; j++) {
+            // Stratified offset in [-0.5, +0.5] of the voxel's footprint
+            float u = (float(i) + 0.5) / n - 0.5;
+            float v = (float(j) + 0.5) / n - 0.5;
+            vec3 samplePos = worldPos + lightRight * (u * voxelSize)
+                                      + lightUp    * (v * voxelSize);
+
+            vec4 lightSpacePos = lightViewProj * vec4(samplePos, 1.0);
+            vec3 projCoords    = lightSpacePos.xyz / lightSpacePos.w;
+            projCoords         = projCoords * 0.5 + 0.5;
+
+            if (projCoords.z > 1.0 || any(lessThan(projCoords.xy, vec2(0.0)))
+                                    || any(greaterThan(projCoords.xy, vec2(1.0)))) {
+                totalWeight += 1.0;
+                continue; // outside frustum — count as unlit
+            }
+
+            float diff  = max(dot(normal, -lightDir), 0.0);
+            float bias  = max(0.01 * (1.0 - diff), 0.002);
+            float depth = texture(shadowMap, projCoords.xy).r;
+            float lit   = (projCoords.z <= depth + bias && diff > 0.01) ? 1.0 : 0.0;
+
+            totalDiff   += diff * lit;
+            totalVis    += lit;
+            totalWeight += 1.0;
+        }
+    }
+
+    if (totalWeight == 0.0) {
+        radiance[idx] = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    // Shadow mapping check
-    float closestDepth = texture(shadowMap, projCoords.xy).r;
-    float currentDepth = projCoords.z;
-    float bias = 0.005;
+    float avgDiff = totalDiff / totalWeight;
+    float avgVis  = totalVis  / totalWeight;
 
-    float diff = max(dot(normal, -lightDir), 0.0);
-    
-    if (currentDepth > closestDepth + bias || diff <= 0.01) {
-        // In shadow or back-facing the sun
+    if (avgVis <= 0.0) {
         radiance[idx] = vec4(0.0, 0.0, 0.0, 1.0);
     } else {
-        // Lit
-        vec3 color = albedo * lightColor * diff;
+        vec3 color = albedo * lightColor * avgDiff;
         radiance[idx] = vec4(color, 1.0);
     }
 }

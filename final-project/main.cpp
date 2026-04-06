@@ -91,6 +91,19 @@ float normal = 1.0f;  // normal map intensity
 
 float lightPos[3] = { 0.0f, 8.0f, 0.0f };
 
+// SVO / cone tracing settings
+int   svoResolution    = 128;
+float coneApertureDeg  = 60.0f; // displayed in degrees, sent to shader as radians
+int   numCones         = 6;
+float indirectBoost    = 2.5f;
+int   numPhotons       = 1;    // samples per axis for radiance injection (total = numPhotons^2)
+
+// Dynamic objects
+struct DynObject { glm::vec3 basePos; float spawnTime; };
+std::vector<DynObject> dynObjects;
+GLuint cubeVAO = 0, cubeVBO = 0;
+GLuint whiteTex = 0, flatNormalTex = 0;
+
 // Forward declaration - defined in model.cpp
 unsigned int TextureFromFile(const char* path, const std::string& directory, bool gamma = false);
 
@@ -224,19 +237,54 @@ void renderGUI() {
 		ImGui::Text("Camera: (%.1f, %.1f, %.1f)", camera.position.x, camera.position.y, camera.position.z);
 		ImGui::Separator();
 		ImGui::Combo("Display Mode", &displayMode, "Final\0Position\0Normal\0Albedo\0SVO Raycast\0Light View\0\0");
-		if (ImGui::Button("Rebuild SVO")) {
-			if (sponza && svo) SVOBuilder::build(sponza, 256, *svo);
+
+		ImGui::Separator();
+		ImGui::Text("SVO");
+		const char* resItems[] = { "64", "128", "256" };
+		const int   resValues[] = { 64, 128, 256 };
+		static int resIdx = 1; // default 128
+		ImGui::Combo("Resolution", &resIdx, resItems, 3);
+		svoResolution = resValues[resIdx];
+		ImGui::SameLine();
+		if (ImGui::Button("Rebuild")) {
+			if (sponza && svo) SVOBuilder::build(sponza, svoResolution, *svo);
 			if (svo) svo->initGPU();
 		}
-		ImGui::DragFloat("Normal Map", &normal, 0.1f, 0.0f, 10.0f);
+
+		ImGui::Separator();
+		ImGui::Text("Radiance Injection");
+		ImGui::SliderInt("Photons/voxel (NxN)", &numPhotons, 1, 8);
+		ImGui::SameLine(); ImGui::TextDisabled("(%d samples)", numPhotons * numPhotons);
+
+		ImGui::Separator();
+		ImGui::Text("Cone Tracing");
+		ImGui::SliderFloat("Aperture (deg)", &coneApertureDeg, 10.0f, 90.0f);
+		ImGui::SliderInt("Num Cones", &numCones, 1, 6);
+		ImGui::SliderFloat("Indirect Boost", &indirectBoost, 0.0f, 2.5f);
+
+		ImGui::Separator();
 		if (ImGui::DragFloat3("Light Position", lightPos, 0.5f)) {
 			if (lightViewMap) lightViewMap->updateMatrices(glm::vec3(lightPos[0], lightPos[1], lightPos[2]), glm::vec3(0.0f, 0.0f, 0.0f));
 		}
-		if (sponza) {
-			static float s = 0.05f;
-			if (ImGui::DragFloat("Sponza Scale", &s, 0.001f, 0.001f, 1.0f)) {
-				sponza->model = glm::scale(glm::mat4(1.0f), glm::vec3(s));
-			}
+
+		ImGui::Separator();
+		ImGui::Text("Dynamic Objects (%d)", (int)dynObjects.size());
+		if (ImGui::Button("Spawn Object")) {
+			float t = glutGet(GLUT_ELAPSED_TIME) * 0.001f;
+			static const glm::vec3 spawnPositions[] = {
+				glm::vec3( 0.0f, 2.0f,  0.0f),
+				glm::vec3( 8.0f, 2.0f,  4.0f),
+				glm::vec3(-8.0f, 2.0f,  4.0f),
+				glm::vec3( 8.0f, 2.0f, -4.0f),
+				glm::vec3(-8.0f, 2.0f, -4.0f),
+				glm::vec3( 0.0f, 2.0f,  8.0f),
+			};
+			int idx = (int)dynObjects.size() % 6;
+			dynObjects.push_back({ spawnPositions[idx], t });
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Clear")) {
+			dynObjects.clear();
 		}
 
 		ImGui::End();
@@ -244,6 +292,112 @@ void renderGUI() {
 
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void initCubeAssets() {
+    // 36 vertices, each: pos(3) normal(3) uv(2) tangent(3) bitangent(3) = 14 floats
+    static const float cubeVerts[] = {
+        // +Z face — normal 0,0,1 | tangent 1,0,0 | bitangent 0,1,0
+        -0.5f,-0.5f, 0.5f,  0,0,1,  0,0,  1,0,0,  0,1,0,
+         0.5f,-0.5f, 0.5f,  0,0,1,  1,0,  1,0,0,  0,1,0,
+         0.5f, 0.5f, 0.5f,  0,0,1,  1,1,  1,0,0,  0,1,0,
+        -0.5f,-0.5f, 0.5f,  0,0,1,  0,0,  1,0,0,  0,1,0,
+         0.5f, 0.5f, 0.5f,  0,0,1,  1,1,  1,0,0,  0,1,0,
+        -0.5f, 0.5f, 0.5f,  0,0,1,  0,1,  1,0,0,  0,1,0,
+        // -Z face — normal 0,0,-1 | tangent -1,0,0 | bitangent 0,1,0
+         0.5f,-0.5f,-0.5f,  0,0,-1,  0,0,  -1,0,0,  0,1,0,
+        -0.5f,-0.5f,-0.5f,  0,0,-1,  1,0,  -1,0,0,  0,1,0,
+        -0.5f, 0.5f,-0.5f,  0,0,-1,  1,1,  -1,0,0,  0,1,0,
+         0.5f,-0.5f,-0.5f,  0,0,-1,  0,0,  -1,0,0,  0,1,0,
+        -0.5f, 0.5f,-0.5f,  0,0,-1,  1,1,  -1,0,0,  0,1,0,
+         0.5f, 0.5f,-0.5f,  0,0,-1,  0,1,  -1,0,0,  0,1,0,
+        // +X face — normal 1,0,0 | tangent 0,0,-1 | bitangent 0,1,0
+         0.5f,-0.5f, 0.5f,  1,0,0,  0,0,  0,0,-1,  0,1,0,
+         0.5f,-0.5f,-0.5f,  1,0,0,  1,0,  0,0,-1,  0,1,0,
+         0.5f, 0.5f,-0.5f,  1,0,0,  1,1,  0,0,-1,  0,1,0,
+         0.5f,-0.5f, 0.5f,  1,0,0,  0,0,  0,0,-1,  0,1,0,
+         0.5f, 0.5f,-0.5f,  1,0,0,  1,1,  0,0,-1,  0,1,0,
+         0.5f, 0.5f, 0.5f,  1,0,0,  0,1,  0,0,-1,  0,1,0,
+        // -X face — normal -1,0,0 | tangent 0,0,1 | bitangent 0,1,0
+        -0.5f,-0.5f,-0.5f,  -1,0,0,  0,0,  0,0,1,  0,1,0,
+        -0.5f,-0.5f, 0.5f,  -1,0,0,  1,0,  0,0,1,  0,1,0,
+        -0.5f, 0.5f, 0.5f,  -1,0,0,  1,1,  0,0,1,  0,1,0,
+        -0.5f,-0.5f,-0.5f,  -1,0,0,  0,0,  0,0,1,  0,1,0,
+        -0.5f, 0.5f, 0.5f,  -1,0,0,  1,1,  0,0,1,  0,1,0,
+        -0.5f, 0.5f,-0.5f,  -1,0,0,  0,1,  0,0,1,  0,1,0,
+        // +Y face — normal 0,1,0 | tangent 1,0,0 | bitangent 0,0,-1
+        -0.5f, 0.5f, 0.5f,  0,1,0,  0,0,  1,0,0,  0,0,-1,
+         0.5f, 0.5f, 0.5f,  0,1,0,  1,0,  1,0,0,  0,0,-1,
+         0.5f, 0.5f,-0.5f,  0,1,0,  1,1,  1,0,0,  0,0,-1,
+        -0.5f, 0.5f, 0.5f,  0,1,0,  0,0,  1,0,0,  0,0,-1,
+         0.5f, 0.5f,-0.5f,  0,1,0,  1,1,  1,0,0,  0,0,-1,
+        -0.5f, 0.5f,-0.5f,  0,1,0,  0,1,  1,0,0,  0,0,-1,
+        // -Y face — normal 0,-1,0 | tangent 1,0,0 | bitangent 0,0,1
+        -0.5f,-0.5f,-0.5f,  0,-1,0,  0,0,  1,0,0,  0,0,1,
+         0.5f,-0.5f,-0.5f,  0,-1,0,  1,0,  1,0,0,  0,0,1,
+         0.5f,-0.5f, 0.5f,  0,-1,0,  1,1,  1,0,0,  0,0,1,
+        -0.5f,-0.5f,-0.5f,  0,-1,0,  0,0,  1,0,0,  0,0,1,
+         0.5f,-0.5f, 0.5f,  0,-1,0,  1,1,  1,0,0,  0,0,1,
+        -0.5f,-0.5f, 0.5f,  0,-1,0,  0,1,  1,0,0,  0,0,1,
+    };
+    const int stride = 14 * sizeof(float);
+
+    glGenVertexArrays(1, &cubeVAO);
+    glGenBuffers(1, &cubeVBO);
+    glBindVertexArray(cubeVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, cubeVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(cubeVerts), cubeVerts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));
+    glEnableVertexAttribArray(3); glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, stride, (void*)(8*sizeof(float)));
+    glEnableVertexAttribArray(4); glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride, (void*)(11*sizeof(float)));
+    glBindVertexArray(0);
+
+    // 1×1 white diffuse texture
+    glGenTextures(1, &whiteTex);
+    glBindTexture(GL_TEXTURE_2D, whiteTex);
+    unsigned char white[4] = { 220, 200, 180, 255 }; // warm off-white
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    // 1×1 flat normal map (tangent-space up = 0.5, 0.5, 1.0)
+    glGenTextures(1, &flatNormalTex);
+    glBindTexture(GL_TEXTURE_2D, flatNormalTex);
+    unsigned char flatN[4] = { 128, 128, 255, 255 };
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, flatN);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void drawCubes(Shader* s, bool modelOnly = false) {
+    if (dynObjects.empty() || cubeVAO == 0) return;
+    float t = glutGet(GLUT_ELAPSED_TIME) * 0.001f;
+
+    if (!modelOnly) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, whiteTex);
+        s->setInt("ourTexture", 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, flatNormalTex);
+        s->setInt("normalMap", 1);
+    }
+
+    glBindVertexArray(cubeVAO);
+    for (const auto& obj : dynObjects) {
+        float elapsed = t - obj.spawnTime;
+        glm::vec3 pos = obj.basePos + glm::vec3(0.0f, 1.5f * std::sin(elapsed * 1.2f), 0.0f);
+        glm::mat4 m = glm::translate(glm::mat4(1.0f), pos);
+        m = glm::rotate(m, elapsed * 0.8f, glm::vec3(0.3f, 1.0f, 0.2f));
+        m = glm::scale(m, glm::vec3(2.0f));
+        glUniformMatrix4fv(glGetUniformLocation(s->ID, "model"), 1, GL_FALSE, glm::value_ptr(m));
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+    }
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);
 }
 
 void renderQuad() {
@@ -284,6 +438,7 @@ void display() {
 		lightViewShader->setMat4("lightView", lightViewMap->lightView);
 		
 		if (sponza) sponza->Draw(lightViewShader);
+		drawCubes(lightViewShader, true);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glViewport(0, 0, width, height); // Restore viewport
 
@@ -294,6 +449,8 @@ void display() {
 			radianceShader->setVec3("lightDir", glm::normalize(glm::vec3(0.0f, 0.0f, 0.0f) - glm::vec3(lightPos[0], lightPos[1], lightPos[2])));
 			radianceShader->setVec3("lightColor", glm::vec3(1.0f, 1.0f, 1.0f));
 			radianceShader->setUInt("numLeaves", (unsigned int)svo->colors.size());
+			radianceShader->setInt("numPhotons", numPhotons);
+			radianceShader->setFloat("voxelSize", 200.0f / (float)svoResolution);
 
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, lightViewMap->depthMap);
@@ -352,6 +509,10 @@ void display() {
 		shader->setFloat("normalMapIntensity", normal);
 		shader->setVec3("viewPos", camera.position);
 		shader->setMat4("lightViewProj", lightViewMap->lightProj * lightViewMap->lightView);
+		shader->setFloat("coneAperture", glm::radians(coneApertureDeg));
+		shader->setInt("numCones", numCones);
+		shader->setFloat("indirectBoost", indirectBoost);
+		shader->setFloat("svoVoxelSize", 200.0f / (float)svoResolution);
 		
 		glActiveTexture(GL_TEXTURE2);
 		glBindTexture(GL_TEXTURE_2D, lightViewMap->depthMap);
@@ -373,6 +534,7 @@ void display() {
 		}
 
 		if (sponza) sponza->Draw();
+		drawCubes(shader);
 	} else if (displayMode >= 1 && displayMode <= 4) {
 		// --- G-BUFFER & SVO MODES (Require Geometry Pass) ---
 
@@ -504,8 +666,10 @@ void init()
 
 	// SVO
 	svo = new SVO();
-	if (sponza) SVOBuilder::build(sponza, 512, *svo);
+	if (sponza) SVOBuilder::build(sponza, svoResolution, *svo);
 	svo->initGPU();
+
+	initCubeAssets();
 
 	// Camera start position — inside the Sponza atrium
 	camera.position  = glm::vec3(0.0f, 2.0f, 0.0f);
@@ -525,6 +689,10 @@ void cleanup() {
 	delete gBuffer;
 	delete lightViewMap;
 	delete sponza;
+	if (cubeVAO) glDeleteVertexArrays(1, &cubeVAO);
+	if (cubeVBO) glDeleteBuffers(1, &cubeVBO);
+	if (whiteTex) glDeleteTextures(1, &whiteTex);
+	if (flatNormalTex) glDeleteTextures(1, &flatNormalTex);
 }
 
 int main(int argc, char** argv) {

@@ -6,6 +6,7 @@ struct ChildDescriptor {
     uint topology;
     uint child_ptr;
     uint leaf_ptr;
+    uint contour_ptr;
 };
 
 layout(std430, binding = 0) buffer NodePool {

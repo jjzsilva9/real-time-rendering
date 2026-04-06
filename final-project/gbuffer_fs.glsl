@@ -7,6 +7,7 @@ layout (location = 2) out vec4 gAlbedoSpec;
 in vec2 TexCoords;
 in vec3 FragPos;
 in vec3 Normal;
+in mat3 TBN;
 
 uniform sampler2D ourTexture;
 uniform sampler2D normalMap;
@@ -17,12 +18,11 @@ void main()
     // Position
     gPosition = FragPos;
     
-    // Normal (with normal map)
-    vec3 flatNormal = Normal;
-    vec3 mappedNormal = texture(normalMap, TexCoords).rgb;
-    mappedNormal = normalize(mappedNormal * 2.0 - 1.0);
-    // Apply normal map (simplified blend for now)
-    gNormal = normalize(mix(flatNormal, mappedNormal, normalMapIntensity));
+    // Normal (with normal map applied via TBN)
+    vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
+    tangentNormal = normalize(tangentNormal * 2.0 - 1.0);
+    vec3 blendedTangentNormal = normalize(mix(vec3(0.0, 0.0, 1.0), tangentNormal, normalMapIntensity));
+    gNormal = normalize(TBN * blendedTangentNormal);
     
     // Albedo
     gAlbedoSpec.rgb = texture(ourTexture, TexCoords).rgb;

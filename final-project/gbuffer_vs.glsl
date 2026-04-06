@@ -9,6 +9,7 @@ layout (location = 4) in vec3 vertex_bitangent;
 out vec3 FragPos;
 out vec2 TexCoords;
 out vec3 Normal;
+out mat3 TBN;
 
 uniform mat4 model;
 uniform mat4 view;
@@ -22,6 +23,12 @@ void main()
     
     mat3 normalMatrix = transpose(inverse(mat3(model)));
     Normal = normalize(normalMatrix * vertex_normal);
+
+    vec3 T = normalize(normalMatrix * vertex_tangent);
+    vec3 N = Normal;
+    T = normalize(T - dot(T, N) * N); // Gram-Schmidt re-orthogonalize
+    vec3 B = cross(N, T);
+    TBN = mat3(T, B, N);
 
     gl_Position = proj * view * worldPos;
 }
