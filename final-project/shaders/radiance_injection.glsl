@@ -50,12 +50,18 @@ void main() {
     vec3 lightUp = cross(lightRight, -lightDir);
 
     float n = float(numPhotons);
-    // Sample surface albedo from the light-view color buffer at the voxel center.
-    // This gives the real texture color rather than the flat material Kd,
-    // enabling correct color bleeding (red walls bleed red, etc.)
-    vec4 centerLS = lightViewProj * vec4(worldPos, 1.0);
-    vec3 centerUV = (centerLS.xyz / centerLS.w) * 0.5 + 0.5;
-    vec3 surfaceAlbedo = (centerUV.z <= 1.0) ? texture(albedoMap, centerUV.xy).rgb : vec3(1.0);
+    // Read surface albedo directly from the SVO albedo SSBO.
+    // The SVO builder stores the surface colour (Kd for Sponza meshes, obj.color for
+    // dynamic cubes) packed into albedos[idx] at voxelisation time. Sampling the
+    // light-view texture instead would require projecting the voxel box-centre, which
+    // often misses the actual surface (especially for cube face voxels whose centre
+    // sits inside or behind the geometry), reading the wrong colour.
+    vec3 surfaceAlbedo = unpackColor(albedos[idx]);
+
+    // Offset sample positions along the surface normal so shadow depth comparisons
+    // are made from the correct side of the surface rather than from the box-centre,
+    // which can be buried inside geometry and always fail the depth test.
+    vec3 surfacePos = worldPos + normal * voxelSize * 0.5;
 
     float totalDiff   = 0.0;
     float totalVis    = 0.0;
@@ -66,8 +72,8 @@ void main() {
             // Stratified offset in [-0.5, +0.5] of the voxel's footprint
             float u = (float(i) + 0.5) / n - 0.5;
             float v = (float(j) + 0.5) / n - 0.5;
-            vec3 samplePos = worldPos + lightRight * (u * voxelSize)
-                                      + lightUp    * (v * voxelSize);
+            vec3 samplePos = surfacePos + lightRight * (u * voxelSize)
+                                        + lightUp    * (v * voxelSize);
 
             vec4 lightSpacePos = lightViewProj * vec4(samplePos, 1.0);
             vec3 projCoords    = lightSpacePos.xyz / lightSpacePos.w;

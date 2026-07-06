@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p shaders)",
+      "Bash(mv simpleVertexShader.txt simpleFragmentShader.txt gbuffer_vs.glsl gbuffer_fs.glsl rect_vs.glsl rect_fs.glsl svo_raycast_fs.glsl light_view_vs.glsl light_view_fs.glsl radiance_injection.glsl radiance_filtering.glsl skyboxFragmentShader.txt skyboxVertexShader.txt shaders/)",
+      "Bash(mv report.tex presentation.tex benchmark_results.csv script.txt docs/)",
+      "Bash(mv simpleVertexShader.txt forward_vs.glsl)",
+      "Bash(mv simpleFragmentShader.txt forward_fs.glsl)"
+    ]
+  }
+}

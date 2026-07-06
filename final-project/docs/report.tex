@@ -1,0 +1,297 @@
+\documentclass[12pt]{article}
+
+% ============================================================================
+% PACKAGES
+% ============================================================================
+\usepackage[margin=1in]{geometry}          % Moderate margins (1 inch)
+\usepackage{setspace}                       % Line spacing control
+\usepackage{times}                          % Times New Roman font
+\usepackage{graphicx}                       % For including images
+\usepackage{hyperref}                       % For hyperlinks
+\usepackage{natbib}                         % For citations
+\usepackage{fancyhdr}                       % For headers and footers
+\usepackage{amsmath}                        % For mathematical equations
+\usepackage{listings}                       % For code snippets
+\usepackage{xcolor}                         % For colored text
+\usepackage{float}                          % For figure placement
+\usepackage{booktabs}                       % For professional tables
+
+% ============================================================================
+% DOCUMENT SETUP
+% ============================================================================
+\setstretch{1.15}                           % 1.15 line spacing
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\thepage}
+\lhead{Implementation Report}
+\renewcommand{\headrulewidth}{0.5pt}
+
+% Code listing setup
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny,
+    backgroundcolor=\color{lightgray!20}
+}
+
+% ============================================================================
+% TITLE PAGE
+% ============================================================================
+\title{Interactive Indirect Illumination Using Voxel Cone Tracing}
+\author{Joseph Silva}
+\date{\today}
+
+% ============================================================================
+% DOCUMENT BEGIN
+% ============================================================================
+\begin{document}
+
+\maketitle
+
+% ============================================================================
+% ABSTRACT
+% ============================================================================
+\section*{Abstract}
+
+This report documents an implementation of voxel cone tracing \cite{crassin2011interactive}, a method that achieves indirect diffuse and specular illumination at interactive frame rates. The scene geometry is voxelised into a sparse voxel octree (SVO); direct lighting is injected into the SVO's leaf voxels via a compute shader; the resulting radiance is propagated bottom-up through the hierarchy; and per-fragment indirect lighting is evaluated by tracing a small number of cones through the SVO during the forward render pass.
+
+The implementation runs on OpenGL 4.3 using compute shaders and shader storage buffer objects (SSBOs), tested on the Sponza atrium scene.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\linewidth]{main.png}
+    \label{fig:main}
+\end{figure}
+
+\newpage
+
+% ============================================================================
+% BACKGROUND
+% ============================================================================
+\section{Background}
+
+\subsection{Related Work}
+
+Crassin et al.\ \cite{crassin2011interactive} introduced voxel cone tracing as a real-time GI method. The core idea is to represent scene radiance in a sparse voxel octree (derived from ``efficient sparse voxel octrees'' of Laine et al. \cite{laine2010efficient}), filter radiance bottom-up to create a mip-map-like hierarchy, then approximate the irradiance at each surface point by tracing cones through that hierarchy. Voxel cone tracing provides diffuse and specular indirect lighting, on the fly, at interactive framerates.
+
+\subsection{Key Concepts}
+
+\textbf{Sparse voxel octree.} A sparse voxel octree (SVO) represents a scene by recursively subdividing its bounding box into octants, stopping early in empty regions so only occupied space is stored. Each internal node holds a child descriptor that encodes which of its eight children are occupied and which are leaves, together with pointers to child nodes and leaf data. Leaf nodes represent the finest level of detail and store surface attributes such as world-space position, normal, and albedo.
+
+\textbf{Radiance injection.} To support indirect lighting, each leaf voxel is augmented with a radiance value computed from the direct light. The voxel centre is projected into the light's clip space, and a stratified set of shadow-map samples across the voxel footprint determines average visibility $v$. The injected radiance is $\mathbf{c}_\text{albedo} \times \mathbf{L}_\text{light} \times (N \cdot L) \times v$, where $\mathbf{c}_\text{albedo}$ is the surface albedo, $\mathbf{L}_\text{light}$ is the incident light colour, and $N \cdot L$ is the cosine term.
+
+\textbf{Radiance filtering.} Once leaf radiance has been injected, it is propagated upward through the hierarchy so that internal nodes carry a pre-filtered summary of the radiance beneath them. Each node gathers radiance from its eight direct children plus the four inward-facing children of each of its six axis-aligned neighbours (Gaussian-weighted). This gives cone tracing a single coarse sample per node rather than requiring it to recurse to every leaf the cone overlaps.
+
+\textbf{Voxel cone tracing.} A cone is traced from the surface point in a given direction with aperture $\alpha$. At distance $d$ the cone diameter is $2\tan(\alpha/2)\,d$. The diameter determines the SVO level to sample; as the cone widens it reads from coarser (higher) nodes. Contributions accumulate via front-to-back alpha compositing. For indirect diffuse, up to six cones are distributed over the hemisphere (the count is a runtime parameter); for specular, one additional cone with aperture $\psi = \sqrt{2/N_s}$ (where $N_s$ is Phong shininess) is traced independently in the reflection direction.
+
+% ============================================================================
+% IMPLEMENTATION DETAILS
+% ============================================================================
+\section{Implementation Details}
+
+\subsection{Scene Voxelisation}
+
+The SVO is constructed on the CPU using a breadth-first traversal of the scene geometry. Triangle data from the loaded mesh is voxelised into a uniform grid at the target resolution, then the occupied cells are linked into the octree hierarchy. The resulting node and leaf data are uploaded to GPU SSBOs (Shader Storage Buffer Objects) once and remain there for the lifetime of the scene. SSBOs are large GPU-resident buffers accessible from both compute and fragment shaders with read and write permissions, making them well-suited here: the radiance injection and filtering compute passes need to write back into the same buffers that the forward pass reads from.
+
+The build runs once at startup and can be re-triggered manually via the GUI when the resolution of the SVO is changed. It does not run per-frame. The CPU approach was chosen for simplicity of implementation; a GPU voxelisation pass (via a geometry shader, as in the original Crassin et al.\ paper) would be required to support fully dynamic geometry, as it can voxelise the scene in a single render pass at interactive rates.
+
+\subsection{Rendering Pipeline}
+
+Each frame executes the following passes in order:
+
+\begin{enumerate}
+    \item \textbf{Light-view pass.} The scene is rendered from the directional light's perspective into a depth map (shadow map) and an albedo colour map, which are used by the radiance injection shader.
+
+    \item \textbf{Radiance injection (compute).} One GPU thread per leaf voxel. Each thread samples the albedo map at the projected voxel centre and tests the projected samples against the shadow map to compute $v$, then writes $\mathbf{c}_\text{albedo} \times \mathbf{L}_\text{light} \times \overline{N \cdot L} \times v$ into the leaf radiance SSBO.
+
+    \item \textbf{Radiance filtering (compute).} The SVO levels are processed bottom-up. For each internal node, its filtered radiance is gathered from direct children and inward-facing neighbours and stored in premultiplied-alpha form.
+
+    \item \textbf{Forward pass.} Each fragment computes direct lighting using a Phong shading model. Shadows are evaluated with $3\times3$ PCF (Percentage Closer Filtering): rather than a single binary shadow-map lookup, nine samples are taken in a neighbourhood around the projected fragment position and averaged, producing a fractional visibility that smooths shadow edges. Indirect lighting is then added by tracing cones through the SVO SSBOs. The final colour is tone-mapped ($x/(x+1)$) and gamma-corrected ($\gamma = 2.2$).
+\end{enumerate}
+
+\subsection{Core Algorithms}
+
+The loop below describes the logic of the \texttt{traceCone} function in the fragment shader:
+\newpage
+\begin{lstlisting}[language=C, caption={Voxel cone tracing accumulation loop}]
+vec4 acc = vec4(0.0);
+float dist = svoVoxelSize;  // start one voxel away
+while (dist < 400.0 && acc.a < 0.98) {
+    float diameter = 2.0 * tan(aperture * 0.5) * dist;
+    vec4 voxel = sampleSVO(origin + dir * dist, diameter);
+    // Front-to-back alpha compositing (radiance is premultiplied)
+    acc.rgb += (1.0 - acc.a) * voxel.rgb;
+    acc.a   += (1.0 - acc.a) * voxel.a;
+    dist    += max(diameter * 0.5, svoVoxelSize * 0.5);
+}
+\end{lstlisting}
+
+\texttt{sampleSVO} traverses the octree to the level where the node diameter matches the cone diameter, returning the node's filtered radiance. Indirect diffuse irradiance is the weighted sum of six cone traces over the hemisphere:
+\[
+    L_\text{indirect} = \frac{\pi}{4} L_{\text{cone}_0} + \frac{3\pi}{20}\sum_{i=1}^{5} L_{\text{cone}_i}
+\]
+where $L_{\text{cone}_i}$ is the radiance returned by the $i$-th cone trace, normalised so that total weights sum to $\pi$ (matching a cosine-weighted hemisphere integral).
+
+\subsection{Key Design Decisions}
+
+\textbf{Isotropic voxels.} Each SVO node stores a single radiance value averaged over all directions. The original paper proposes \emph{anisotropic} voxels, where six directional radiance values are stored per node (one per axis-aligned face), allowing the cone-tracing step to sample only the radiance facing the cone direction. The isotropic approach is simpler to implement and halves the radiance storage, but causes light leaking at large cone apertures where the cone samples radiance from the wrong side of a surface.
+
+\textbf{Linear SSBO storage.} SVO nodes and their associated data are stored in flat linear SSBOs indexed by node ID. The paper instead uses a brick-based layout where each node maps to a small 3D texture tile in a texture atlas, enabling hardware-accelerated trilinear filtering at no extra cost. The flat SSBO approach avoids the complexity of brick packing and atlas management, but requires manual trilinear interpolation in the shader.
+
+\textbf{No dynamic SVO partition.} The paper describes partitioning the SVO into a static region (built once) and a dynamic region (rebuilt per frame for moving geometry), so that injection and filtering can be restricted to only the portions of the tree that have changed. This implementation makes no such distinction: the full injection and filtering pipeline executes every frame regardless of whether dynamic objects are present, which is wasteful for purely static scenes and means dynamic objects incur the full per-frame cost of re-injecting the entire leaf set.
+
+\textbf{Dynamic objects.} Procedural cubes can be spawned at runtime. In the default static-SVO mode they are drawn in the light-view and forward passes - casting direct shadows and receiving lighting from the pre-built SVO - but are not voxelised, so they are invisible to the GI system. In the dynamic-SVO mode (described in Section~\ref{sec:results}) the full SVO is rebuilt every frame at reduced resolution, and dynamic object geometry is included in that voxelisation pass, allowing them to both contribute and receive indirect illumination correctly.
+
+\textbf{Single directional light.} The radiance injection pass is written for a single directional light source. Supporting multiple lights would require one injection pass per light, accumulating into the same radiance buffer.
+
+\section{Demo}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{gi.png}
+    \caption{Sponza atrium with GI disabled (left) and enabled (right).}
+    \label{fig:gi_comparison}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{res.png}
+    \caption{SVO resolution comparison at the same camera angle: $64^3$ (left), $128^3$ (centre), $256^3$ (right). Higher resolution reduces blocky artefacts and improves contact shading quality.}
+    \label{fig:resolution}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{albedo.png}
+    \caption{Debug display modes: world-space normals (left), albedo (centre), final (right).}
+    \label{fig:debug}
+\end{figure}
+
+% ============================================================================
+% RESULTS AND EVALUATION
+% ============================================================================
+\section{Results and Evaluation}
+\label{sec:results}
+
+Table~\ref{tab:resolution} reports GPU pass timings and frame rate across SVO resolutions for a static scene.
+
+\begin{table}[H]
+\centering
+\caption{Performance breakdown by SVO resolution (static scene, display mode: Final).}
+\label{tab:resolution}
+\begin{tabular}{lrrrrr}
+\toprule
+Resolution & Build (ms) & Injection (ms) & Filtering (ms) & Forward (ms) & FPS \\
+\midrule
+$64^3$  & 21.50  & 0.014 & 0.151 & 13.68 & 60.0 \\
+$128^3$ & 100.08 & 0.027 & 0.196 & 13.20 & 60.1 \\
+$256^3$ & 642.49 & 0.074 & 0.391 & 14.91 & 58.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We can clearly observe that building the SVO is not feasible on a per-frame rate - the build time is one of the largest components, meaning that even the lowest resolution SVO would have a per-frame time of 35.345ms, exceeding the 33ms that would be needed to maintain 30 fps. However, we could also reduce the time spent in the forward pass by reducing the number of diffuse cones traced.
+
+Table~\ref{tab:cones} shows how forward-pass GPU time scales with the number of diffuse cones (at $128^3$ resolution).
+
+\begin{table}[H]
+\centering
+\caption{Forward-pass GPU time vs.\ number of diffuse cones ($128^3$ resolution).}
+\label{tab:cones}
+\begin{tabular}{rr}
+\toprule
+Num.\ Cones & Forward GPU time (ms) \\
+\midrule
+1 &  5.79 \\
+3 &  9.32 \\
+5 & 11.75 \\
+6 & 13.20 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Reasonably then, we could rebuild the SVO, of a resolution of 64, at each frame, given we reduce the number of diffuse cones traced. This was implemented as a dynamic SVO mode: which reduces the resolution to $64^3$ and the cone count to 4, and rebuilds the full SVO every frame on the CPU before the light-view pass. Because the entire SVO is rebuilt from scratch each frame, dynamic objects are included in the voxelisation and therefore participate fully in the GI system - casting and receiving indirect illumination. In practice this mode achieves approximately 30\,FPS, confirming that a reduced-resolution per-frame rebuild is viable for interactive use with dynamic geometry at the cost of lower GI quality.
+
+\subsection{Shadow Map Resolution}
+
+Table~\ref{tab:shadowmap} shows how shadow map resolution affects per-pass timings at $128^3$ SVO resolution with 6 diffuse cones. The shadow map is sampled during both the radiance injection pass (to compute per-voxel visibility) and the forward pass (for PCF direct shadows).
+
+\begin{table}[H]
+\centering
+\caption{Per-pass GPU timings vs.\ shadow map resolution ($128^3$, 6 cones, no dynamic objects).}
+\label{tab:shadowmap}
+\begin{tabular}{rrrrr}
+\toprule
+Shadow Map & Injection (ms) & Filtering (ms) & Forward (ms) & FPS \\
+\midrule
+$512^2$  & 0.022 & 0.214 & 15.47 & 58.4 \\
+$1024^2$ & 0.027 & 0.196 & 13.20 & 60.1 \\
+$2048^2$ & 0.043 & 0.201 & 13.38 & 60.1 \\
+$4096^2$ & 0.251 & 0.203 & 13.64 & 59.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We can see that the main increased cost here is in the injection stage, although this is a relatively small cost compared to the time spent in the forward pass. Unusually, the 512 shadow map has the highest forward pass time of all of the shadow maps, leading to the lowest FPS.
+
+\subsection{Dynamic Object Overhead}
+
+The light-view, injection, and filtering passes execute every frame regardless of whether dynamic objects are present. As Table~\ref{tab:dynamic} shows, injection and filtering remain sub-millisecond regardless of cube count. The forward pass increases from 9.44\,ms (no cubes) to 12.21\,ms (5 cubes), attributable to the additional cone-traced fragments from the cube surfaces. All configurations remain at the maximum capped FPS of 60.
+
+\begin{table}[H]
+\centering
+\caption{Per-pass GPU timings and FPS with increasing dynamic objects ($128^3$, 6 cones).}
+\label{tab:dynamic}
+\begin{tabular}{rrrrr}
+\toprule
+Dynamic Objects & Injection (ms) & Filtering (ms) & Forward (ms) & FPS \\
+\midrule
+0 & 0.027 & 0.196 & 13.20 & 60.1 \\
+1 & 0.028 & 0.208 & 14.73 & 59.9 \\
+3 & 0.027 & 0.194 & 13.11 & 60.1 \\
+5 & 0.027 & 0.195 & 13.32 & 60.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Real-time Capability}
+
+At $64^3$ and $128^3$ the renderer sustains 60\,FPS (vsync-capped). At $256^3$ the forward pass rises to 14.91\,ms and frame rate drops to 58\,FPS, indicating the 16\,ms budget is exceeded. The forward pass is the dominant per-frame cost, scaling roughly linearly with cone count (5.79\,ms at 1 cone, 13.20\,ms at 6). Injection and filtering are negligible throughout at under 0.40\,ms combined even at $256^3$. SVO build time grows steeply with resolution - from 21\,ms at $64^3$ to 642\,ms at $256^3$ - although by choosing a low SVO resolution and reducing the number of cones, this can be performed per frame. Dynamic objects produce no consistent overhead in injection or filtering; the forward pass varies by a small margin within noise. Shadow map resolution has a modest effect: $4096^2$ increases injection time tenfold (0.251\,ms) as the larger texture is more expensive to sample per voxel, while forward-pass cost is largely unaffected across all shadow map sizes.
+
+% ============================================================================
+% IMPROVEMENTS AND LIMITATIONS
+% ============================================================================
+\section{Improvements and Limitations}
+
+The current implementation has several practical constraints. The SVO is built on the CPU, which becomes slow at higher resolutions. In the default mode, dynamic objects are not voxelised and contribute no indirect light themselves; the dynamic-SVO mode addresses this but at reduced resolution and approximately halved frame rate. The radiance injection shader supports only a single directional light; adding more lights would require one injection pass per source.
+
+The most impactful improvement would be \textbf{GPU voxelisation} via a geometry-shader pass (as in the original Crassin et al.\ paper), which would allow the SVO to be rebuilt or partially updated at interactive rates and enable correct GI from dynamic geometry. \textbf{Multi-light support} could be added by accumulating injection passes, one per light, into the same radiance buffer. \textbf{Anisotropic voxels} (storing six directional radiance values per node) would improve view-dependent effects such as specular highlights viewed at grazing angles.
+
+\newpage
+
+% ============================================================================
+% REFERENCES
+% ============================================================================
+
+\begin{thebibliography}{9}
+
+\bibitem{crassin2011interactive}
+Crassin, C., Neyret, F., Sainz, M., Green, S., \& Eisemann, E. (2011).
+``Interactive Indirect Illumination Using Voxel Cone Tracing.''
+\emph{Computer Graphics Forum}, 30(7), 1921--1930.
+
+\bibitem{laine2010efficient}
+Laine, S., \& Karras, T. (2010).
+``Efficient Sparse Voxel Octrees.''
+\emph{Proceedings of the 2010 ACM SIGGRAPH/Eurographics Symposium on Interactive 3D Graphics and Games}, 55--63.
+
+\bibitem{phong1975illumination}
+Phong, B. T. (1975).
+``Illumination for Computer Generated Pictures.''
+\emph{Communications of the ACM}, 18(6), 311--317.
+
+\end{thebibliography}
+
+\end{document}

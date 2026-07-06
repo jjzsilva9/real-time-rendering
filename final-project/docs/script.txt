@@ -1,0 +1,59 @@
+Following the paper:
+
+- Radiance injection: the paper renders the scene from the light's point of view, then
+  runs one thread per light-view-map pixel, splatting each pixel as a photon into
+  whichever leaf voxel it lands in. It stores the energy and incoming direction as a
+  Gaussian lobe (NDF) per voxel, using atomic adds to handle multiple photons per voxel.
+
+- MIP-filtering: a bottom-up compute pass propagates radiance up the octree. The paper
+  uses a full 3×3×3 Gaussian across 27 neighbours in three passes. We implement the
+  first two passes only: direct children at full weight, and the facing children of the
+  six axis-aligned neighbours at half weight. Edge and corner neighbours (Pass 3) are
+  skipped.
+
+Deviations from the paper:
+
+- Radiance injection direction: the paper iterates per light-view-map pixel (push),
+  splatting photons into voxels with atomic adds and storing a directional distribution
+  per voxel. We iterate per voxel (pull), projecting each voxel into the light-view map
+  to read albedo and shadow values. This avoids atomics but loses directional information
+  — our stored radiance is a single isotropic vec4, so cone tracing cannot account for
+  the direction light entered a voxel. The paper's anisotropic extension (6 directional
+  values per voxel) is not implemented.
+
+- CPU voxelisation: the paper builds the SVO on the GPU using the rasterisation
+  pipeline for speed. We do it on the CPU at startup, which is slower to build but
+  simpler and sufficient for a static scene.
+
+- Isotropic voxels: the paper proposes anisotropic directional pre-integration (storing
+  6 directional values per voxel) to reduce the "red/green wall" leaking problem.
+  We store a single averaged colour, which is simpler and still produces plausible
+  results.
+
+- Storage layout: the paper uses 3×3×3 brick textures in GPU memory for cache-friendly
+  access. We use flat SSBOs — correct but less cache-efficient.
+
+- Dynamic objects: the paper re-voxelises animated geometry into a dynamic region of
+  the SVO every frame. Our dynamic cubes are rendered in the light-view and forward passes — they cast correct
+  direct shadows and receive GI from the static SVO — but they are not voxelised, so
+  they do not contribute indirect light to the rest of the scene.
+
+
+Results and evaluation:
+
+Visual quality: the implementation successfully reproduces the core visual effects from
+the paper. Colour bleeding is visible — coloured surfaces tint adjacent geometry through
+the GI system. The specular cone gives view-dependent glossy reflections whose sharpness
+responds to the material shininess parameter. MIP-filtering produces smooth GI
+transitions without visible voxel boundaries at the sampling level we use.
+
+Performance: at 128^3 resolution with no dynamic objects the scene runs at around 60fps
+— real-time, matching the paper's headline claim. Adding dynamic objects drops this significantly because injection and filtering already
+run unconditionally every frame — dynamic objects compound this by adding geometry to
+the light-view pass and updating the shadow map each frame.
+
+Limitations: light leaking occurs at large cone apertures due to isotropic voxels —
+the paper's anisotropic directional pre-integration would reduce this. Dynamic GI
+is not supported. The CPU voxelisation means changing SVO resolution requires a
+multi-second rebuild. These are known simplifications relative to the paper rather than
+bugs — the core algorithm is faithfully implemented.

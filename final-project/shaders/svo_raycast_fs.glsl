@@ -31,13 +31,12 @@ layout(std430, binding = 7) buffer ContourPool {
     vec4 contours[]; // xyz = normal, w = distance; matches C++ Contour (16 bytes, no padding)
 };
 
-layout(std430, binding = 4) buffer RadiancePool {
-    vec4 radiance[];
+layout(std430, binding = 1) buffer AlbedoPool {
+    uint albedos[];
 };
 
 uniform vec3 cameraPos;
 uniform mat4 invViewProj;
-uniform sampler2D gAlbedo;
 
 const int MAX_DEPTH = 12;
 
@@ -69,10 +68,8 @@ void main() {
     bool rootHit = ray_aabb(p, d, minB, maxB, t_min, t_max);
     t_min = max(t_min, 0.0);
     
-    vec4 sceneColor = texture(gAlbedo, TexCoord);
-
     if (!rootHit) {
-        FragColor = sceneColor;
+        FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
@@ -127,8 +124,12 @@ void main() {
                         if(((leafMask >> i) & 1u) != 0u) leafOffset++;
                     }
                     uint leafIdx = nodes[parentIdx].leaf_ptr + leafOffset;
-                    vec4 rad = radiance[leafIdx];
-                    
+                    vec3 color = vec3(
+                        float((albedos[leafIdx] >> 24) & 0xFFu),
+                        float((albedos[leafIdx] >> 16) & 0xFFu),
+                        float((albedos[leafIdx] >>  8) & 0xFFu)
+                    ) / 255.0;
+
                     // ESVO Contour Hit Test
                     uint contourIdx = nodes[parentIdx].contour_ptr + leafOffset;
                     vec4 c = contours[contourIdx];
@@ -142,8 +143,6 @@ void main() {
                             real_tv_min = t_plane;
                         }
                     }
-
-                    vec3 color = rad.rgb;
                     
                     // Wireframe logic (from previous version)
                     vec3 hitP = p + real_tv_min * d;
@@ -202,5 +201,5 @@ void main() {
         }
     }
 
-    FragColor = sceneColor;
+    FragColor = vec4(0.0, 0.0, 0.0, 1.0);
 }

@@ -205,9 +205,9 @@ void main() {
     
     float shadow = calculateShadow(WorldFragPos, worldNormal, lightDirWorld);
     
-    vec3 diffColor = texture(ourTexture, TexCoord).rgb;
+    vec3 diffColor = texture(ourTexture, TexCoord).rgb * Kd;
     float diff = max(dot(world_mapped_normal, lightDirWorld), 0.0);
-    vec3 Id = Ld * diffColor * Kd * diff * (1.0 - shadow);
+    vec3 Id = Ld * diffColor * diff * (1.0 - shadow);
     
     // Specular in light space/world space hybrid
     vec3 worldV = normalize(viewPos - WorldFragPos); 

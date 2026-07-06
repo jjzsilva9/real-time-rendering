@@ -6,6 +6,9 @@
 #include <iostream>
 #include <limits>
 #include <math.h>
+#include <chrono>
+#include <fstream>
+#include <random>
 
 namespace std {
   using ::sqrt;
@@ -96,16 +99,142 @@ int   svoResolution    = 128;
 float coneApertureDeg  = 60.0f; // displayed in degrees, sent to shader as radians
 int   numCones         = 6;
 float indirectBoost    = 2.5f;
+float cubeScale        = 6.0f;
 float specularBoost    = 1.0f;
 float phongNs          = 80.0f;
 
 int   shadowMapRes     = 1024; // shadow map / light-view map resolution
 
+bool dynamicSVOMode = false;  // rebuild SVO every frame at 64^3, 4 cones
+
 // Dynamic objects
-struct DynObject { glm::vec3 basePos; float spawnTime; };
+struct DynObject { glm::vec3 basePos; float spawnTime; glm::vec3 color; };
 std::vector<DynObject> dynObjects;
+
+static glm::vec3 randomBrightColor() {
+    // Generate saturated colours by keeping one channel high, one mid, one low
+    static std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    float h = dist(rng);               // hue 0-1
+    float s = 0.7f + dist(rng) * 0.3f; // saturation 0.7-1.0
+    float v = 0.8f + dist(rng) * 0.2f; // value 0.8-1.0
+    // HSV -> RGB
+    int   i = (int)(h * 6.0f);
+    float f = h * 6.0f - i;
+    float p = v * (1.0f - s);
+    float q = v * (1.0f - f * s);
+    float t = v * (1.0f - (1.0f - f) * s);
+    switch (i % 6) {
+        case 0: return { v, t, p };
+        case 1: return { q, v, p };
+        case 2: return { p, v, t };
+        case 3: return { p, q, v };
+        case 4: return { t, p, v };
+        default: return { v, p, q };
+    }
+}
+
+static const glm::vec3 kSpawnPositions[] = {
+    {  0.0f, 2.0f,  0.0f },
+    {  8.0f, 2.0f,  4.0f },
+    { -8.0f, 2.0f,  4.0f },
+    {  8.0f, 2.0f, -4.0f },
+    { -8.0f, 2.0f, -4.0f },
+    {  0.0f, 2.0f,  8.0f },
+};
 GLuint cubeVAO = 0, cubeVBO = 0;
 GLuint whiteTex = 0, flatNormalTex = 0;
+
+// Cube geometry: 36 vertices, each: pos(3) normal(3) uv(2) tangent(3) bitangent(3) = 14 floats
+// Positions are in [-0.5, 0.5]^3 local space. Scale by 2 -> [-1, 1]^3 world units per side.
+static const float kCubeVerts[] = {
+    // +Z face
+    -0.5f,-0.5f, 0.5f,  0,0,1,  0,0,  1,0,0,  0,1,0,
+     0.5f,-0.5f, 0.5f,  0,0,1,  1,0,  1,0,0,  0,1,0,
+     0.5f, 0.5f, 0.5f,  0,0,1,  1,1,  1,0,0,  0,1,0,
+    -0.5f,-0.5f, 0.5f,  0,0,1,  0,0,  1,0,0,  0,1,0,
+     0.5f, 0.5f, 0.5f,  0,0,1,  1,1,  1,0,0,  0,1,0,
+    -0.5f, 0.5f, 0.5f,  0,0,1,  0,1,  1,0,0,  0,1,0,
+    // -Z face
+     0.5f,-0.5f,-0.5f,  0,0,-1,  0,0,  -1,0,0,  0,1,0,
+    -0.5f,-0.5f,-0.5f,  0,0,-1,  1,0,  -1,0,0,  0,1,0,
+    -0.5f, 0.5f,-0.5f,  0,0,-1,  1,1,  -1,0,0,  0,1,0,
+     0.5f,-0.5f,-0.5f,  0,0,-1,  0,0,  -1,0,0,  0,1,0,
+    -0.5f, 0.5f,-0.5f,  0,0,-1,  1,1,  -1,0,0,  0,1,0,
+     0.5f, 0.5f,-0.5f,  0,0,-1,  0,1,  -1,0,0,  0,1,0,
+    // +X face
+     0.5f,-0.5f, 0.5f,  1,0,0,  0,0,  0,0,-1,  0,1,0,
+     0.5f,-0.5f,-0.5f,  1,0,0,  1,0,  0,0,-1,  0,1,0,
+     0.5f, 0.5f,-0.5f,  1,0,0,  1,1,  0,0,-1,  0,1,0,
+     0.5f,-0.5f, 0.5f,  1,0,0,  0,0,  0,0,-1,  0,1,0,
+     0.5f, 0.5f,-0.5f,  1,0,0,  1,1,  0,0,-1,  0,1,0,
+     0.5f, 0.5f, 0.5f,  1,0,0,  0,1,  0,0,-1,  0,1,0,
+    // -X face
+    -0.5f,-0.5f,-0.5f,  -1,0,0,  0,0,  0,0,1,  0,1,0,
+    -0.5f,-0.5f, 0.5f,  -1,0,0,  1,0,  0,0,1,  0,1,0,
+    -0.5f, 0.5f, 0.5f,  -1,0,0,  1,1,  0,0,1,  0,1,0,
+    -0.5f,-0.5f,-0.5f,  -1,0,0,  0,0,  0,0,1,  0,1,0,
+    -0.5f, 0.5f, 0.5f,  -1,0,0,  1,1,  0,0,1,  0,1,0,
+    -0.5f, 0.5f,-0.5f,  -1,0,0,  0,1,  0,0,1,  0,1,0,
+    // +Y face
+    -0.5f, 0.5f, 0.5f,  0,1,0,  0,0,  1,0,0,  0,0,-1,
+     0.5f, 0.5f, 0.5f,  0,1,0,  1,0,  1,0,0,  0,0,-1,
+     0.5f, 0.5f,-0.5f,  0,1,0,  1,1,  1,0,0,  0,0,-1,
+    -0.5f, 0.5f, 0.5f,  0,1,0,  0,0,  1,0,0,  0,0,-1,
+     0.5f, 0.5f,-0.5f,  0,1,0,  1,1,  1,0,0,  0,0,-1,
+    -0.5f, 0.5f,-0.5f,  0,1,0,  0,1,  1,0,0,  0,0,-1,
+    // -Y face
+    -0.5f,-0.5f,-0.5f,  0,-1,0,  0,0,  1,0,0,  0,0,1,
+     0.5f,-0.5f,-0.5f,  0,-1,0,  1,0,  1,0,0,  0,0,1,
+     0.5f,-0.5f, 0.5f,  0,-1,0,  1,1,  1,0,0,  0,0,1,
+    -0.5f,-0.5f,-0.5f,  0,-1,0,  0,0,  1,0,0,  0,0,1,
+     0.5f,-0.5f, 0.5f,  0,-1,0,  1,1,  1,0,0,  0,0,1,
+    -0.5f,-0.5f, 0.5f,  0,-1,0,  0,1,  1,0,0,  0,0,1,
+};
+
+// GPU timing
+GLuint timerQueries[3] = { 0, 0, 0 }; // [0]=injection, [1]=filtering, [2]=forward
+double gpuTimeInjection = 0.0, gpuTimeFiltering = 0.0, gpuTimeForward = 0.0;
+double svoBuildTimeMs = 0.0;
+
+// ---- Benchmark system ----
+enum class BenchState { Idle, Warmup, Measure, Done };
+
+struct BenchConfig { int svoRes, numCones, numDynObjs, shadowRes; const char* label; };
+struct BenchResult  { BenchConfig cfg; double buildMs, injMs, filtMs, fwdMs, fps; };
+
+static const BenchConfig kBenchConfigs[] = {
+    // SVO resolution sweep: 6 cones, no dynamics, 1024 shadow map
+    { 64,  6, 0, 1024, "64^3, 6 cones"   },
+    {128,  6, 0, 1024, "128^3, 6 cones"  },
+    {256,  6, 0, 1024, "256^3, 6 cones"  },
+    // Cone count sweep: 128^3, no dynamics, 1024 shadow map (6-cone already above)
+    {128,  1, 0, 1024, "128^3, 1 cone"   },
+    {128,  3, 0, 1024, "128^3, 3 cones"  },
+    {128,  5, 0, 1024, "128^3, 5 cones"  },
+    // Dynamic objects: 128^3, 6 cones, 1024 shadow map
+    {128,  6, 1, 1024, "128^3, 1 dyn"    },
+    {128,  6, 3, 1024, "128^3, 3 dyn"    },
+    {128,  6, 5, 1024, "128^3, 5 dyn"    },
+    // Shadow map resolution sweep: 128^3, 6 cones, no dynamics (1024 already above)
+    {128,  6, 0,  512, "128^3, sm=512"   },
+    {128,  6, 0, 2048, "128^3, sm=2048"  },
+    {128,  6, 0, 4096, "128^3, sm=4096"  },
+};
+static const int kNumBenchConfigs = (int)(sizeof(kBenchConfigs) / sizeof(kBenchConfigs[0]));
+
+static const double kWarmupSecs  = 1.0;
+static const double kMeasureSecs = 2.0;
+
+BenchState            benchState     = BenchState::Idle;
+int                   benchConfigIdx = 0;
+double                benchTimer     = 0.0;
+double                benchFpsAccum  = 0.0;
+double                benchInjAccum  = 0.0;
+double                benchFiltAccum = 0.0;
+double                benchFwdAccum  = 0.0;
+int                   benchSamples   = 0;
+std::vector<BenchResult> benchResults;
 
 // Forward declaration - defined in model.cpp
 unsigned int TextureFromFile(const char* path, const std::string& directory, bool gamma = false);
@@ -226,6 +355,8 @@ void reshape(int x, int y) {
 #pragma endregion INPUT_FUNCTIONS
 
 
+void applyBenchConfig(int idx); // forward declaration
+
 void renderGUI() {
 	ImGuiIO& io = ImGui::GetIO();
 	io.DisplaySize = ImVec2((float)width, (float)height);
@@ -238,6 +369,10 @@ void renderGUI() {
 		ImGui::Begin("Controls", &showGUI, ImGuiWindowFlags_AlwaysAutoResize);
 
 		ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+		ImGui::Text("SVO Build: %.1f ms", svoBuildTimeMs);
+		ImGui::Text("GPU Injection: %.2f ms", gpuTimeInjection);
+		ImGui::Text("GPU Filtering: %.2f ms", gpuTimeFiltering);
+		ImGui::Text("GPU Forward:   %.2f ms", gpuTimeForward);
 		ImGui::Text("Camera: (%.1f, %.1f, %.1f)", camera.position.x, camera.position.y, camera.position.z);
 		ImGui::Separator();
 		ImGui::Combo("Display Mode", &displayMode, "Final\0Position\0Normal\0Albedo\0SVO Raycast\0Light View\0\0");
@@ -251,8 +386,21 @@ void renderGUI() {
 		svoResolution = resValues[resIdx];
 		ImGui::SameLine();
 		if (ImGui::Button("Rebuild")) {
-			if (sponza && svo) SVOBuilder::build(sponza, svoResolution, *svo);
+			if (sponza && svo) {
+				auto _t0 = std::chrono::high_resolution_clock::now();
+				SVOBuilder::build(sponza, svoResolution, *svo);
+				auto _t1 = std::chrono::high_resolution_clock::now();
+				svoBuildTimeMs = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
+			}
 			if (svo) svo->initGPU();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button(dynamicSVOMode ? "Stop Dynamic" : "Dynamic SVO")) {
+			dynamicSVOMode = !dynamicSVOMode;
+			if (dynamicSVOMode) {
+				svoResolution = 64;
+				numCones = 4;
+			}
 		}
 
 		ImGui::Separator();
@@ -284,22 +432,61 @@ void renderGUI() {
 
 		ImGui::Separator();
 		ImGui::Text("Dynamic Objects (%d)", (int)dynObjects.size());
+		ImGui::SliderFloat("Cube Scale", &cubeScale, 1.0f, 20.0f);
 		if (ImGui::Button("Spawn Object")) {
 			float t = glutGet(GLUT_ELAPSED_TIME) * 0.001f;
-			static const glm::vec3 spawnPositions[] = {
-				glm::vec3( 0.0f, 2.0f,  0.0f),
-				glm::vec3( 8.0f, 2.0f,  4.0f),
-				glm::vec3(-8.0f, 2.0f,  4.0f),
-				glm::vec3( 8.0f, 2.0f, -4.0f),
-				glm::vec3(-8.0f, 2.0f, -4.0f),
-				glm::vec3( 0.0f, 2.0f,  8.0f),
-			};
 			int idx = (int)dynObjects.size() % 6;
-			dynObjects.push_back({ spawnPositions[idx], t });
+			dynObjects.push_back({ kSpawnPositions[idx], t, randomBrightColor() });
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Clear")) {
 			dynObjects.clear();
+		}
+
+		ImGui::Separator();
+		ImGui::Text("Benchmark");
+		if (benchState == BenchState::Idle) {
+			if (ImGui::Button("Run Benchmark")) {
+				benchResults.clear();
+				benchConfigIdx = 0;
+				applyBenchConfig(0);
+				benchState = BenchState::Warmup;
+				benchTimer = 0.0;
+			}
+		} else if (benchState == BenchState::Done) {
+			ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "Complete! See benchmark_results.csv");
+			if (ImGui::BeginTable("benchTable", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+				ImGui::TableSetupColumn("Config");
+				ImGui::TableSetupColumn("Build(ms)");
+				ImGui::TableSetupColumn("Inj(ms)");
+				ImGui::TableSetupColumn("Filt(ms)");
+				ImGui::TableSetupColumn("Fwd(ms)");
+				ImGui::TableSetupColumn("FPS");
+				ImGui::TableHeadersRow();
+				for (const auto& r : benchResults) {
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn(); ImGui::Text("%s", r.cfg.label);
+					ImGui::TableNextColumn(); ImGui::Text("%.0f", r.buildMs);
+					ImGui::TableNextColumn(); ImGui::Text("%.2f", r.injMs);
+					ImGui::TableNextColumn(); ImGui::Text("%.2f", r.filtMs);
+					ImGui::TableNextColumn(); ImGui::Text("%.2f", r.fwdMs);
+					ImGui::TableNextColumn(); ImGui::Text("%.1f", r.fps);
+				}
+				ImGui::EndTable();
+			}
+			if (ImGui::Button("Reset")) {
+				benchResults.clear();
+				benchState    = BenchState::Idle;
+				svoResolution = 128;
+				numCones      = 6;
+				dynObjects.clear();
+			}
+		} else {
+			const char* stateStr = (benchState == BenchState::Warmup) ? "Warmup" : "Measuring";
+			double totalSecs = (benchState == BenchState::Warmup) ? kWarmupSecs : kMeasureSecs;
+			ImGui::Text("%s  cfg %d/%d  (%.1fs/%.1fs)", stateStr,
+				benchConfigIdx + 1, kNumBenchConfigs, benchTimer, totalSecs);
+			ImGui::Text("  %s", kBenchConfigs[benchConfigIdx].label);
 		}
 
 		ImGui::End();
@@ -310,58 +497,13 @@ void renderGUI() {
 }
 
 void initCubeAssets() {
-    // 36 vertices, each: pos(3) normal(3) uv(2) tangent(3) bitangent(3) = 14 floats
-    static const float cubeVerts[] = {
-        // +Z face — normal 0,0,1 | tangent 1,0,0 | bitangent 0,1,0
-        -0.5f,-0.5f, 0.5f,  0,0,1,  0,0,  1,0,0,  0,1,0,
-         0.5f,-0.5f, 0.5f,  0,0,1,  1,0,  1,0,0,  0,1,0,
-         0.5f, 0.5f, 0.5f,  0,0,1,  1,1,  1,0,0,  0,1,0,
-        -0.5f,-0.5f, 0.5f,  0,0,1,  0,0,  1,0,0,  0,1,0,
-         0.5f, 0.5f, 0.5f,  0,0,1,  1,1,  1,0,0,  0,1,0,
-        -0.5f, 0.5f, 0.5f,  0,0,1,  0,1,  1,0,0,  0,1,0,
-        // -Z face — normal 0,0,-1 | tangent -1,0,0 | bitangent 0,1,0
-         0.5f,-0.5f,-0.5f,  0,0,-1,  0,0,  -1,0,0,  0,1,0,
-        -0.5f,-0.5f,-0.5f,  0,0,-1,  1,0,  -1,0,0,  0,1,0,
-        -0.5f, 0.5f,-0.5f,  0,0,-1,  1,1,  -1,0,0,  0,1,0,
-         0.5f,-0.5f,-0.5f,  0,0,-1,  0,0,  -1,0,0,  0,1,0,
-        -0.5f, 0.5f,-0.5f,  0,0,-1,  1,1,  -1,0,0,  0,1,0,
-         0.5f, 0.5f,-0.5f,  0,0,-1,  0,1,  -1,0,0,  0,1,0,
-        // +X face — normal 1,0,0 | tangent 0,0,-1 | bitangent 0,1,0
-         0.5f,-0.5f, 0.5f,  1,0,0,  0,0,  0,0,-1,  0,1,0,
-         0.5f,-0.5f,-0.5f,  1,0,0,  1,0,  0,0,-1,  0,1,0,
-         0.5f, 0.5f,-0.5f,  1,0,0,  1,1,  0,0,-1,  0,1,0,
-         0.5f,-0.5f, 0.5f,  1,0,0,  0,0,  0,0,-1,  0,1,0,
-         0.5f, 0.5f,-0.5f,  1,0,0,  1,1,  0,0,-1,  0,1,0,
-         0.5f, 0.5f, 0.5f,  1,0,0,  0,1,  0,0,-1,  0,1,0,
-        // -X face — normal -1,0,0 | tangent 0,0,1 | bitangent 0,1,0
-        -0.5f,-0.5f,-0.5f,  -1,0,0,  0,0,  0,0,1,  0,1,0,
-        -0.5f,-0.5f, 0.5f,  -1,0,0,  1,0,  0,0,1,  0,1,0,
-        -0.5f, 0.5f, 0.5f,  -1,0,0,  1,1,  0,0,1,  0,1,0,
-        -0.5f,-0.5f,-0.5f,  -1,0,0,  0,0,  0,0,1,  0,1,0,
-        -0.5f, 0.5f, 0.5f,  -1,0,0,  1,1,  0,0,1,  0,1,0,
-        -0.5f, 0.5f,-0.5f,  -1,0,0,  0,1,  0,0,1,  0,1,0,
-        // +Y face — normal 0,1,0 | tangent 1,0,0 | bitangent 0,0,-1
-        -0.5f, 0.5f, 0.5f,  0,1,0,  0,0,  1,0,0,  0,0,-1,
-         0.5f, 0.5f, 0.5f,  0,1,0,  1,0,  1,0,0,  0,0,-1,
-         0.5f, 0.5f,-0.5f,  0,1,0,  1,1,  1,0,0,  0,0,-1,
-        -0.5f, 0.5f, 0.5f,  0,1,0,  0,0,  1,0,0,  0,0,-1,
-         0.5f, 0.5f,-0.5f,  0,1,0,  1,1,  1,0,0,  0,0,-1,
-        -0.5f, 0.5f,-0.5f,  0,1,0,  0,1,  1,0,0,  0,0,-1,
-        // -Y face — normal 0,-1,0 | tangent 1,0,0 | bitangent 0,0,1
-        -0.5f,-0.5f,-0.5f,  0,-1,0,  0,0,  1,0,0,  0,0,1,
-         0.5f,-0.5f,-0.5f,  0,-1,0,  1,0,  1,0,0,  0,0,1,
-         0.5f,-0.5f, 0.5f,  0,-1,0,  1,1,  1,0,0,  0,0,1,
-        -0.5f,-0.5f,-0.5f,  0,-1,0,  0,0,  1,0,0,  0,0,1,
-         0.5f,-0.5f, 0.5f,  0,-1,0,  1,1,  1,0,0,  0,0,1,
-        -0.5f,-0.5f, 0.5f,  0,-1,0,  0,1,  1,0,0,  0,0,1,
-    };
     const int stride = 14 * sizeof(float);
 
     glGenVertexArrays(1, &cubeVAO);
     glGenBuffers(1, &cubeVBO);
     glBindVertexArray(cubeVAO);
     glBindBuffer(GL_ARRAY_BUFFER, cubeVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(cubeVerts), cubeVerts, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kCubeVerts), kCubeVerts, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
     glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));
@@ -392,10 +534,11 @@ void drawCubes(Shader* s, bool modelOnly = false) {
     if (dynObjects.empty() || cubeVAO == 0) return;
     float t = glutGet(GLUT_ELAPSED_TIME) * 0.001f;
 
+    // Always bind whiteTex so both the forward and light-view shaders sample a neutral base
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, whiteTex);
+    s->setInt("ourTexture", 0);
     if (!modelOnly) {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, whiteTex);
-        s->setInt("ourTexture", 0);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, flatNormalTex);
         s->setInt("normalMap", 1);
@@ -407,10 +550,12 @@ void drawCubes(Shader* s, bool modelOnly = false) {
         glm::vec3 pos = obj.basePos + glm::vec3(0.0f, 1.5f * std::sin(elapsed * 1.2f), 0.0f);
         glm::mat4 m = glm::translate(glm::mat4(1.0f), pos);
         m = glm::rotate(m, elapsed * 0.8f, glm::vec3(0.3f, 1.0f, 0.2f));
-        m = glm::scale(m, glm::vec3(2.0f));
+        m = glm::scale(m, glm::vec3(cubeScale));
         glUniformMatrix4fv(glGetUniformLocation(s->ID, "model"), 1, GL_FALSE, glm::value_ptr(m));
+        s->setVec3("Kd", obj.color); // always set — both forward and light-view shaders use Kd
         glDrawArrays(GL_TRIANGLES, 0, 36);
     }
+    s->setVec3("Kd", glm::vec3(1.0f)); // reset to white for subsequent draws
     glBindVertexArray(0);
     glActiveTexture(GL_TEXTURE0);
 }
@@ -439,7 +584,124 @@ void renderQuad() {
 	glBindVertexArray(0);
 }
 
+
+void applyBenchConfig(int idx) {
+    const BenchConfig& cfg = kBenchConfigs[idx];
+    svoResolution = cfg.svoRes;
+    numCones      = cfg.numCones;
+    displayMode   = 0; // always Final mode for timing
+
+    if (cfg.shadowRes != shadowMapRes) {
+        shadowMapRes = cfg.shadowRes;
+        delete lightViewMap;
+        lightViewMap = new LightViewMap(shadowMapRes, shadowMapRes);
+        lightViewMap->updateMatrices(glm::vec3(lightPos[0], lightPos[1], lightPos[2]), glm::vec3(0.0f));
+    }
+
+    dynObjects.clear();
+    for (int i = 0; i < cfg.numDynObjs; i++)
+        dynObjects.push_back({ kSpawnPositions[i % 6], 0.0f, randomBrightColor() });
+
+    if (sponza && svo) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        SVOBuilder::build(sponza, cfg.svoRes, *svo);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        svoBuildTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        svo->initGPU();
+    }
+}
+
+void updateBenchmark() {
+    if (benchState == BenchState::Idle || benchState == BenchState::Done) return;
+
+    benchTimer += (double)delta;
+
+    if (benchState == BenchState::Warmup) {
+        if (benchTimer >= kWarmupSecs) {
+            benchState     = BenchState::Measure;
+            benchTimer     = 0.0;
+            benchFpsAccum  = 0.0;
+            benchInjAccum  = 0.0;
+            benchFiltAccum = 0.0;
+            benchFwdAccum  = 0.0;
+            benchSamples   = 0;
+        }
+    } else if (benchState == BenchState::Measure) {
+        if (delta > 0.0f) benchFpsAccum += 1.0 / delta;
+        benchInjAccum  += gpuTimeInjection;
+        benchFiltAccum += gpuTimeFiltering;
+        benchFwdAccum  += gpuTimeForward;
+        benchSamples++;
+
+        if (benchTimer >= kMeasureSecs) {
+            BenchResult r;
+            r.cfg    = kBenchConfigs[benchConfigIdx];
+            r.buildMs = svoBuildTimeMs;
+            r.injMs  = benchSamples > 0 ? benchInjAccum  / benchSamples : 0.0;
+            r.filtMs = benchSamples > 0 ? benchFiltAccum / benchSamples : 0.0;
+            r.fwdMs  = benchSamples > 0 ? benchFwdAccum  / benchSamples : 0.0;
+            r.fps    = benchSamples > 0 ? benchFpsAccum  / benchSamples : 0.0;
+            benchResults.push_back(r);
+
+            benchConfigIdx++;
+            if (benchConfigIdx >= kNumBenchConfigs) {
+                benchState = BenchState::Done;
+                // Write CSV
+                std::ofstream f("benchmark_results.csv");
+                f << "Config,SVO Res,Num Cones,Dyn Objects,Shadow Res,Build (ms),Inject (ms),Filter (ms),Forward (ms),FPS\n";
+                for (const auto& res : benchResults)
+                    f << res.cfg.label << "," << res.cfg.svoRes << "," << res.cfg.numCones << ","
+                      << res.cfg.numDynObjs << "," << res.cfg.shadowRes << "," << res.buildMs << "," << res.injMs << ","
+                      << res.filtMs << "," << res.fwdMs << "," << res.fps << "\n";
+                f.close();
+                std::cout << "[Benchmark] Done. Results in benchmark_results.csv\n";
+            } else {
+                applyBenchConfig(benchConfigIdx);
+                benchState = BenchState::Warmup;
+                benchTimer = 0.0;
+            }
+        }
+    }
+}
+
 void display() {
+	// --- DYNAMIC SVO REBUILD ---
+	if (dynamicSVOMode && sponza && svo) {
+		// Build world-space triangles from each dynamic cube
+		std::vector<SVOBuilder::ExtraTriangle> extraTris;
+		{
+			float t = glutGet(GLUT_ELAPSED_TIME) * 0.001f;
+			const int stride = 14; // floats per vertex
+			for (const auto& obj : dynObjects) {
+				float elapsed = t - obj.spawnTime;
+				glm::vec3 pos = obj.basePos + glm::vec3(0.0f, 1.5f * std::sin(elapsed * 1.2f), 0.0f);
+				glm::mat4 m = glm::translate(glm::mat4(1.0f), pos);
+				m = glm::rotate(m, elapsed * 0.8f, glm::vec3(0.3f, 1.0f, 0.2f));
+				m = glm::scale(m, glm::vec3(2.0f));
+				glm::mat3 normalMat = glm::transpose(glm::inverse(glm::mat3(m)));
+				for (int tri = 0; tri < 12; tri++) { // 12 triangles = 36 vertices / 3
+					SVOBuilder::ExtraTriangle et;
+					for (int v = 0; v < 3; v++) {
+						const float* vp = &kCubeVerts[(tri * 3 + v) * stride];
+						glm::vec4 wpos = m * glm::vec4(vp[0], vp[1], vp[2], 1.0f);
+						et.v[v] = glm::vec3(wpos);
+					}
+					// Normal from first vertex of the triangle (all three share the same face normal)
+					const float* np = &kCubeVerts[tri * 3 * stride + 3];
+					et.normal = glm::normalize(normalMat * glm::vec3(np[0], np[1], np[2]));
+					et.color = obj.color;
+					extraTris.push_back(et);
+				}
+			}
+		}
+
+		auto _t0 = std::chrono::high_resolution_clock::now();
+		SVOBuilder::build(sponza, svoResolution, *svo, extraTris);
+		auto _t1 = std::chrono::high_resolution_clock::now();
+		svoBuildTimeMs = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
+		svo->initGPU();
+	}
+
 	// --- LIGHT-VIEW MAP PASS ---
 	if (lightViewMap && lightViewShader) {
 		lightViewMap->bindForWriting();
@@ -487,8 +749,13 @@ void display() {
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, svo->radianceSSBO);
 
 			int numGroups = ((int)svo->colors.size() + 255) / 256;
+			glBeginQuery(GL_TIME_ELAPSED, timerQueries[0]);
 			glDispatchCompute(numGroups, 1, 1);
+			glEndQuery(GL_TIME_ELAPSED);
 			glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+			GLuint64 injElapsed = 0;
+			glGetQueryObjectui64v(timerQueries[0], GL_QUERY_RESULT, &injElapsed);
+			gpuTimeInjection = injElapsed * 1e-6;
 		}
 
 		// --- RADIANCE FILTERING PASS (MIB-MAPPING) ---
@@ -500,6 +767,7 @@ void display() {
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, svo->neighborSSBO);
 
 			// Bottom-up pass
+			glBeginQuery(GL_TIME_ELAPSED, timerQueries[1]);
 			for (int i = (int)svo->levelOffsets.size() - 1; i >= 0; i--) {
 				uint32_t levelStart = svo->levelOffsets[i];
 				uint32_t levelEnd = (i == (int)svo->levelOffsets.size() - 1) ? (uint32_t)svo->nodes.size() : svo->levelOffsets[i + 1];
@@ -513,6 +781,10 @@ void display() {
 					glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 				}
 			}
+			glEndQuery(GL_TIME_ELAPSED);
+			GLuint64 filtElapsed = 0;
+			glGetQueryObjectui64v(timerQueries[1], GL_QUERY_RESULT, &filtElapsed);
+			gpuTimeFiltering = filtElapsed * 1e-6;
 		}
 	}
 
@@ -555,8 +827,13 @@ void display() {
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, svo->contourSSBO);
 		}
 
+		glBeginQuery(GL_TIME_ELAPSED, timerQueries[2]);
 		if (sponza) sponza->Draw();
 		drawCubes(shader);
+		glEndQuery(GL_TIME_ELAPSED);
+		GLuint64 fwdElapsed = 0;
+		glGetQueryObjectui64v(timerQueries[2], GL_QUERY_RESULT, &fwdElapsed);
+		gpuTimeForward = fwdElapsed * 1e-6;
 	} else if (displayMode >= 1 && displayMode <= 4) {
 		// --- G-BUFFER & SVO MODES (Require Geometry Pass) ---
 
@@ -613,14 +890,10 @@ void display() {
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, svo->contourSSBO);
 		}
 		
-		if (svo && svo->radianceSSBO) {
-			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, svo->radianceSSBO);
+		if (svo && svo->colorSSBO) {
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, svo->colorSSBO);
 		}
 		
-		glActiveTexture(GL_TEXTURE1);
-		glBindTexture(GL_TEXTURE_2D, gBuffer->gAlbedoSpec);
-		svoShader->setInt("gAlbedo", 1);
-
 		renderQuad();
 		glEnable(GL_DEPTH_TEST);
 	}
@@ -640,6 +913,7 @@ void display() {
 		glEnable(GL_DEPTH_TEST);
 	}
 
+	updateBenchmark();
 	renderGUI();
 	glutSwapBuffers();
 }
@@ -667,13 +941,13 @@ void updateScene() {
 
 void init()
 {
-	shader = new Shader("simpleVertexShader.txt", "simpleFragmentShader.txt");
-	gShader = new Shader("gbuffer_vs.glsl", "gbuffer_fs.glsl");
-	rectShader = new Shader("rect_vs.glsl", "rect_fs.glsl");
-	svoShader = new Shader("rect_vs.glsl", "svo_raycast_fs.glsl"); 
-	lightViewShader = new Shader("light_view_vs.glsl", "light_view_fs.glsl");
-	radianceShader = new Shader("radiance_injection.glsl");
-	radianceFilteringShader = new Shader("radiance_filtering.glsl");
+	shader = new Shader("shaders/forward_vs.glsl", "shaders/forward_fs.glsl");
+	gShader = new Shader("shaders/gbuffer_vs.glsl", "shaders/gbuffer_fs.glsl");
+	rectShader = new Shader("shaders/rect_vs.glsl", "shaders/rect_fs.glsl");
+	svoShader = new Shader("shaders/rect_vs.glsl", "shaders/svo_raycast_fs.glsl");
+	lightViewShader = new Shader("shaders/light_view_vs.glsl", "shaders/light_view_fs.glsl");
+	radianceShader = new Shader("shaders/radiance_injection.glsl");
+	radianceFilteringShader = new Shader("shaders/radiance_filtering.glsl");
 	gBuffer = new GBuffer(width, height);
 	lightViewMap = new LightViewMap(1024, 1024);
 
@@ -686,9 +960,17 @@ void init()
 	sponza = new Model("sponza/Sponza.gltf", glm::vec3(0.0f, 0.0f, 0.0f), shader);
 	sponza->model = glm::scale(glm::mat4(1.0f), glm::vec3(0.05f));
 
+	// GPU timer queries
+	glGenQueries(3, timerQueries);
+
 	// SVO
 	svo = new SVO();
-	if (sponza) SVOBuilder::build(sponza, svoResolution, *svo);
+	if (sponza) {
+		auto _t0 = std::chrono::high_resolution_clock::now();
+		SVOBuilder::build(sponza, svoResolution, *svo);
+		auto _t1 = std::chrono::high_resolution_clock::now();
+		svoBuildTimeMs = std::chrono::duration<double, std::milli>(_t1 - _t0).count();
+	}
 	svo->initGPU();
 
 	initCubeAssets();
@@ -715,6 +997,7 @@ void cleanup() {
 	if (cubeVBO) glDeleteBuffers(1, &cubeVBO);
 	if (whiteTex) glDeleteTextures(1, &whiteTex);
 	if (flatNormalTex) glDeleteTextures(1, &flatNormalTex);
+	if (timerQueries[0]) glDeleteQueries(3, timerQueries);
 }
 
 int main(int argc, char** argv) {

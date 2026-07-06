@@ -165,7 +165,8 @@ uint32_t getNeighbor(const std::vector<ChildDescriptor>& nodes, uint32_t parentI
     return internalChildPoolIdx(nodes, parentNeighbor, mirrorOctant);
 }
 
-void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
+void SVOBuilder::build(Model* model, int resolution, SVO& outSvo,
+                       const std::vector<ExtraTriangle>& extraTris) {
     outSvo.clear();
     
     glm::vec3 minB(-100.0f, -20.0f, -100.0f);
@@ -208,6 +209,33 @@ void SVOBuilder::build(Model* model, int resolution, SVO& outSvo) {
                             float triDist = glm::dot(triNormal, boxCenter);
                             denseGrid[idx] = { true, color, triNormal, boxCenter, triDist };
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Extra triangles (e.g. dynamic objects, already in world space)
+    for (const auto& et : extraTris) {
+        glm::vec3 tMin = glm::min(et.v[0], glm::min(et.v[1], et.v[2]));
+        glm::vec3 tMax = glm::max(et.v[0], glm::max(et.v[1], et.v[2]));
+
+        int minX = (std::max)(0, (int)((tMin.x - minB.x) / voxelW));
+        int minY = (std::max)(0, (int)((tMin.y - minB.y) / voxelW));
+        int minZ = (std::max)(0, (int)((tMin.z - minB.z) / voxelW));
+        int maxX = (std::min)(resolution - 1, (int)((tMax.x - minB.x) / voxelW));
+        int maxY = (std::min)(resolution - 1, (int)((tMax.y - minB.y) / voxelW));
+        int maxZ = (std::min)(resolution - 1, (int)((tMax.z - minB.z) / voxelW));
+
+        for (int vz = minZ; vz <= maxZ; vz++) {
+            for (int vy = minY; vy <= maxY; vy++) {
+                for (int vx = minX; vx <= maxX; vx++) {
+                    int idx = vx + (vy * resolution) + (vz * resolution * resolution);
+                    if (denseGrid[idx].occupied) continue;
+                    glm::vec3 boxCenter = minB + glm::vec3(vx, vy, vz) * voxelW + boxHalfSize;
+                    if (triBoxOverlap(boxCenter, boxHalfSize, et.v)) {
+                        float triDist = glm::dot(et.normal, boxCenter);
+                        denseGrid[idx] = { true, et.color, et.normal, boxCenter, triDist };
                     }
                 }
             }
